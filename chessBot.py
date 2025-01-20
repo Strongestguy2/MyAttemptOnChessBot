@@ -1,135 +1,111 @@
 import tkinter as tk
 
-def Initialization ():
-    global pieces, turn, selected_piece, valid_moves, captured_white, captured_black, material_difference, MATERIAL_VALUES, last_move
+#region Initialization
+def Initialization():
+    global pieces, turn, selected_piece, valid_moves, captured_white, captured_black, material_difference, MATERIAL_VALUES, last_move, moved, move_history
 
     pieces = {
-        "wK" : (4, 7),
-        "bK" : (4, 0),
-        "wQ" : (3, 7),
-        "bQ" : (3, 0),
-        "wN1" : (1, 7), "wN2" : (6, 7),
-        "bN1" : (1, 0), "bN2" : (6, 0),
-        "wB1" : (2, 7), "wB2" : (5, 7),
-        "bB1" : (2, 0), "bB2" : (5, 0),
-        "wR1" : (0, 7), "wR2" : (7, 7),
-        "bR1" : (0, 0), "bR2" : (7, 0),
-        "wP1" : (0, 6), "wP2" : (1, 6), "wP3" : (2, 6), "wP4" : (3, 6), 
-        "wP5" : (4, 6), "wP6" : (5, 6), "wP7" : (6, 6), "wP8" : (7, 6),
-        "bP1" : (0, 1), "bP2" : (1, 1), "bP3" : (2, 1), "bP4" : (3, 1),
-        "bP5" : (4, 1), "bP6" : (5, 1), "bP7" : (6, 1), "bP8" : (7, 1),
+        "wK": (4, 7), "bK": (4, 0), "wQ": (3, 7), "bQ": (3, 0),
+        "wN1": (1, 7), "wN2": (6, 7), "bN1": (1, 0), "bN2": (6, 0),
+        "wB1": (2, 7), "wB2": (5, 7), "bB1": (2, 0), "bB2": (5, 0),
+        "wR1": (0, 7), "wR2": (7, 7), "bR1": (0, 0), "bR2": (7, 0),
+        "wP1": (0, 6), "wP2": (1, 6), "wP3": (2, 6), "wP4": (3, 6),
+        "wP5": (4, 6), "wP6": (5, 6), "wP7": (6, 6), "wP8": (7, 6),
+        "bP1": (0, 1), "bP2": (1, 1), "bP3": (2, 1), "bP4": (3, 1),
+        "bP5": (4, 1), "bP6": (5, 1), "bP7": (6, 1), "bP8": (7, 1),
     }
 
     MATERIAL_VALUES = {
-        "K" : 0,
-        "Q" : 10,
-        "N" : 3,
-        "B" : 3,
-        "R" : 5,
-        "P" : 1,
+        "K": 0, "Q": 10, "N": 3, "B": 3, "R": 5, "P": 1,
     }
 
     turn = ["white"]
     selected_piece = None
     valid_moves = []
-
     captured_white = []
     captured_black = []
     material_difference = 0
-
     last_move = []
+    moved = {p: False for p in pieces}
+    move_history = []
+#endregion
 
-#region UI stuff (Draw_Chessboard() + On_Canvas_Click() + Update_Material_Panel() + Convert_To_Icon())
-
-def Draw_Chessboard(canvas, pieces, valid_moves):
+#region UI Functions
+def Draw_Chessboard(canvas, pieces, valid_moves, king_in_check_pos=None):
     square_size = 50
 
-    for row in range (8):
-        for col in range (8):
-            x1 = col * square_size
-            y1 = row * square_size
-            x2 = x1 + square_size
-            y2 = y1 + square_size
-
-            if (row + col) % 2 == 0:
-                color = "white"
-            else:
-                color = "#739552"
-
+    for row in range(8):
+        for col in range(8):
+            x1, y1 = col * square_size, row * square_size
+            x2, y2 = x1 + square_size, y1 + square_size
+            color = "white" if (row + col) % 2 == 0 else "#739552"
             canvas.create_rectangle(x1, y1, x2, y2, fill=color)
-            
             if row == 7:
-                canvas.create_text (x1 + square_size - 5, y2 - 5, text=chr(97 + col), fill = "#739552" if color == "white" else "white", anchor="se", font=("Arial", 10))
+                canvas.create_text(x1 + square_size - 5, y2 - 5, text=chr(97 + col), fill="#739552" if color == "white" else "white", anchor="se", font=("Arial", 10))
             if col == 0:
-                canvas.create_text (x1 + 5, y1 + 5, text=str(8 - row), fill = "#739552" if color == "white" else "white", anchor="nw", font=("Arial", 10))
+                canvas.create_text(x1 + 5, y1 + 5, text=str(8 - row), fill="#739552" if color == "white" else "white", anchor="nw", font=("Arial", 10))
 
     for move in valid_moves:
         col, row = move
-        x = col * square_size + square_size // 2
-        y = row * square_size + square_size // 2
+        x, y = col * square_size + square_size // 2, row * square_size + square_size // 2
         canvas.create_oval(x - 5, y - 5, x + 5, y + 5, fill="#739552")
 
     for piece, position in pieces.items():
         col, row = position
-        x = col * square_size + square_size // 2
-        y = row * square_size + square_size // 2
+        x, y = col * square_size + square_size // 2, row * square_size + square_size // 2
         canvas.create_text(x, y, text=Convert_To_Icon(piece), font=("Arial", 24))
 
-def On_Canvas_Click (event, canvas, pieces, turn):
+    # Highlight the king's square if in check
+    if king_in_check_pos:
+        x1 = king_in_check_pos[0] * square_size
+        y1 = king_in_check_pos[1] * square_size
+        x2 = x1 + square_size
+        y2 = y1 + square_size
+        canvas.create_rectangle(x1, y1, x2, y2, fill="red")
+
+def On_Canvas_Click(event, canvas, pieces, turn):
     square_size = 50
-    col = event.x // square_size
-    row = event.y // square_size
+    col, row = event.x // square_size, event.y // square_size
     clicked_square = (col, row)
 
     global selected_piece, valid_moves
 
     if selected_piece:
         if clicked_square in valid_moves:
-            Move_Piece (canvas, pieces, selected_piece, clicked_square, turn)
+            Move_Piece(canvas, pieces, selected_piece, clicked_square, turn)
             selected_piece = None
             valid_moves = []
         else:
             selected_piece = None
             valid_moves = []
-            Draw_Chessboard (canvas, pieces, valid_moves)
+            Draw_Chessboard(canvas, pieces, valid_moves)
     else:
         for piece, position in pieces.items():
             if position == clicked_square and piece.startswith(turn[0][0]):
                 selected_piece = piece
-                valid_moves = Calculate_Valid_Moves (piece, position, pieces, last_move)
-                Draw_Chessboard (canvas, pieces, valid_moves)
+                valid_moves = Calculate_Valid_Moves(piece, position, pieces, last_move)
+                Draw_Chessboard(canvas, pieces, valid_moves)
                 break
 
-def Update_Material_Panel ():
-    white_captured = " ".join (Convert_To_Icon (p) for p in captured_white)
-    black_captured = " ".join (Convert_To_Icon (p) for p in captured_black)
-
-    white_material_label.config (text = f"White material: {white_captured} (+{material_difference})")
-    black_material_label.config (text = f"Black material: {black_captured} ({-material_difference})")
+def Update_Material_Panel():
+    white_captured = " ".join(Convert_To_Icon(p) for p in captured_white)
+    black_captured = " ".join(Convert_To_Icon(p) for p in captured_black)
+    white_material_label.config(text=f"White material: {white_captured} (+{material_difference})")
+    black_material_label.config(text=f"Black material: {black_captured} ({-material_difference})")
 
 def Convert_To_Icon(piece):
     color, piece_type = piece[0], piece[1]
     icons = {
-        ('w', 'K'): "♔",
-        ('b', 'K'): "♚",
-        ('w', 'Q'): "♕",
-        ('b', 'Q'): "♛",
-        ('w', 'N'): "♘",
-        ('b', 'N'): "♞",
-        ('w', 'B'): "♗",
-        ('b', 'B'): "♝",
-        ('w', 'R'): "♖",
-        ('b', 'R'): "♜",
-        ('w', 'P'): "♙",
-        ('b', 'P'): "♟",
+        ('w', 'K'): "♔", ('b', 'K'): "♚", ('w', 'Q'): "♕", ('b', 'Q'): "♛",
+        ('w', 'N'): "♘", ('b', 'N'): "♞", ('w', 'B'): "♗", ('b', 'B'): "♝",
+        ('w', 'R'): "♖", ('b', 'R'): "♜", ('w', 'P'): "♙", ('b', 'P'): "♟",
     }
     return icons.get((color, piece_type), piece)
-
 #endregion
 
-#region Moving Pieces (Move_Piece())
-def Move_Piece (canvas, pieces, piece, new_position, turn):
-    global material_difference, last_move
+#region Moving Pieces
+def Move_Piece(canvas, pieces, piece, new_position, turn):
+    global material_difference, last_move, move_history
 
     captured_piece = None
     old_position = pieces[piece]
@@ -153,17 +129,28 @@ def Move_Piece (canvas, pieces, piece, new_position, turn):
 
     if captured_piece:
         del pieces[captured_piece]
-
         if piece.startswith("w"):
             captured_black.append(captured_piece)
             material_difference += MATERIAL_VALUES[captured_piece[1]]
         else:
             captured_white.append(captured_piece)
             material_difference -= MATERIAL_VALUES[captured_piece[1]]
-
         Update_Material_Panel()
 
+    # Handle castling
+    if piece[1] == "K" and abs(old_position[0] - new_position[0]) == 2:
+        if new_position[0] == 6:  # Short castling
+            rook_pos = (7, old_position[1])
+            new_rook_pos = (5, old_position[1])
+        elif new_position[0] == 2:  # Long castling
+            rook_pos = (0, old_position[1])
+            new_rook_pos = (3, old_position[1])
+        rook_piece = [r for r, pos in pieces.items() if pos == rook_pos][0]
+        pieces[rook_piece] = new_rook_pos
+        moved[rook_piece] = True
+
     pieces[piece] = new_position
+    moved[piece] = True
 
     # Pawn promotion and check for end of game as before
     if piece[1] == "P" and (new_position[1] == 0 or new_position[1] == 7):
@@ -171,6 +158,8 @@ def Move_Piece (canvas, pieces, piece, new_position, turn):
         return
 
     last_move[:] = [(piece, old_position, new_position)]
+    move_history.append(f"{piece}: {old_position} -> {new_position}")
+    Update_Move_History()
 
     if "wK" not in pieces:
         Display_Game_Over(canvas, "Black wins!")
@@ -180,31 +169,97 @@ def Move_Piece (canvas, pieces, piece, new_position, turn):
         turn[0] = "black" if turn[0] == "white" else "white"
 
     canvas.delete("all")
+
+    # Check if the new side is in check
+    if Is_In_Check(pieces, turn[0]):
+        # Find king position for highlighting
+        king_pos = None
+        for p, pos in pieces.items():
+            if p.startswith(turn[0][0]) and p[1] == "K":
+                king_pos = pos
+                break
+        if Is_Checkmate(pieces, turn[0]):
+            Display_Game_Over(canvas, f"{'White' if turn[0] == 'black' else 'Black'} wins by checkmate!")
+            return
+        else:
+            # Redraw board with king highlighted
+            Draw_Chessboard(canvas, pieces, [], king_in_check_pos=king_pos)
+            return
+
     Draw_Chessboard(canvas, pieces, [])
 
-# endregion
+def Update_Move_History():
+    move_history_text.config(state=tk.NORMAL)
+    move_history_text.delete(1.0, tk.END)
+    move_history_text.insert(tk.END, "\n".join(move_history))
+    move_history_text.config(state=tk.DISABLED)
+#endregion
 
-#region chess Check Move (Is_Valid_Move() + Check all pieces valid moves + Calculate_Valid_Moves())
+#region Moves & Checks
+def Is_Square_Attacked(pieces, pos, color, visited=None):
+    if visited is None:
+        visited = set()
+    key = (tuple(pieces.items()), pos, color)
+    if key in visited:
+        return False
+    visited.add(key)
 
+    # Uses Get_Basic_Moves to see if an opponent can capture 'pos'
+    opponent_color = "white" if color == "black" else "black"
+    for p, piece_pos in pieces.items():
+        if p.startswith(opponent_color[0]):
+            # Basic moves without check consideration
+            enemy_moves = Get_Basic_Moves(p, piece_pos, pieces, last_move, skip_king=True)
+            if pos in enemy_moves:
+                return True
+    return False
 
-def Check_King_Valid_Moves (position, pieces, turn):
-    moves = []
-    for dx in range (-1, 2):
-        for dy in range (-1, 2):
+def Check_King_Valid_Moves(position, pieces, turn):
+    safe_moves = []
+    color = "white" if turn == "w" else "black"
+    # Normal king moves
+    for dx in range(-1, 2):
+        for dy in range(-1, 2):
             if dx == 0 and dy == 0:
                 continue
             new_position = (position[0] + dx, position[1] + dy)
             if 0 <= new_position[0] < 8 and 0 <= new_position[1] < 8:
-                if not any (pieces.get (p) == new_position for p in pieces if p.startswith (turn[0])):
-                    moves.append (new_position)
-    return moves
+                if not any(pieces.get(p) == new_position for p in pieces if p.startswith(turn[0])):
+                    if not Is_Square_Attacked(pieces, new_position, color):
+                        safe_moves.append(new_position)
 
-def Check_Queen_Valid_Moves (position, pieces, turn):
+    # Castling
+    king_id = f"{turn}K"
+    if not moved.get(king_id, True):
+        row = 7 if color == "white" else 0
+
+        # Short castling (king-side)
+        # Rook at (7, row)
+        for r, rpos in pieces.items():
+            if r.startswith(turn[0] + "R") and rpos == (7, row) and not moved.get(r, True):
+                if (5, row) not in pieces.values() and (6, row) not in pieces.values():
+                    if not Is_Square_Attacked(pieces, (4, row), color) \
+                       and not Is_Square_Attacked(pieces, (5, row), color) \
+                       and not Is_Square_Attacked(pieces, (6, row), color):
+                        safe_moves.append((6, row))
+
+        # Long castling (queen-side)
+        # Rook at (0, row)
+        for r, rpos in pieces.items():
+            if r.startswith(turn[0] + "R") and rpos == (0, row) and not moved.get(r, True):
+                if (1, row) not in pieces.values() and (2, row) not in pieces.values() and (3, row) not in pieces.values():
+                    if not Is_Square_Attacked(pieces, (4, row), color) \
+                       and not Is_Square_Attacked(pieces, (3, row), color) \
+                       and not Is_Square_Attacked(pieces, (2, row), color):
+                        safe_moves.append((2, row))
+
+    return safe_moves
+
+def Check_Queen_Valid_Moves(position, pieces, turn):
     moves = []
     directions = [(1, 1), (1, -1), (-1, 1), (-1, -1), (1, 0), (-1, 0), (0, 1), (0, -1)]
-
     for dx, dy in directions:
-        for step in range (1, 8):
+        for step in range(1, 8):
             new_position = (position[0] + step * dx, position[1] + step * dy)
             if 0 <= new_position[0] < 8 and 0 <= new_position[1] < 8:
                 if any(pieces.get(p) == new_position for p in pieces if p.startswith(turn[0])):
@@ -214,10 +269,9 @@ def Check_Queen_Valid_Moves (position, pieces, turn):
                     break
     return moves
 
-def Check_Knight_Valid_Moves (position, pieces, turn):
+def Check_Knight_Valid_Moves(position, pieces, turn):
     moves = []
     directions = [(1, 2), (2, 1), (-1, 2), (-2, 1), (1, -2), (2, -1), (-1, -2), (-2, -1)]
-
     for dx, dy in directions:
         new_position = (position[0] + dx, position[1] + dy)
         if 0 <= new_position[0] < 8 and 0 <= new_position[1] < 8:
@@ -225,12 +279,11 @@ def Check_Knight_Valid_Moves (position, pieces, turn):
                 moves.append(new_position)
     return moves
 
-def Check_Bishop_Valid_Moves (position, pieces, turn):
+def Check_Bishop_Valid_Moves(position, pieces, turn):
     moves = []
     directions = [(1, 1), (1, -1), (-1, 1), (-1, -1)]
-
     for dx, dy in directions:
-        for step in range (1, 8):
+        for step in range(1, 8):
             new_position = (position[0] + step * dx, position[1] + step * dy)
             if 0 <= new_position[0] < 8 and 0 <= new_position[1] < 8:
                 if any(pieces.get(p) == new_position for p in pieces if p.startswith(turn[0])):
@@ -238,15 +291,13 @@ def Check_Bishop_Valid_Moves (position, pieces, turn):
                 moves.append(new_position)
                 if any(pieces.get(p) == new_position for p in pieces if not p.startswith(turn[0])):
                     break
-                
     return moves
 
-def Check_Rook_Valid_Moves (position, pieces, turn):
+def Check_Rook_Valid_Moves(position, pieces, turn):
     moves = []
     directions = [(1, 0), (-1, 0), (0, 1), (0, -1)]
-
     for dx, dy in directions:
-        for step in range (1, 8):
+        for step in range(1, 8):
             new_position = (position[0] + step * dx, position[1] + step * dy)
             if 0 <= new_position[0] < 8 and 0 <= new_position[1] < 8:
                 if any(pieces.get(p) == new_position for p in pieces if p.startswith(turn[0])):
@@ -285,25 +336,90 @@ def Check_Pawn_Valid_Moves(position, pieces, turn, last_move):
     
     return moves
 
-def Calculate_Valid_Moves (piece, position, pieces, last_move):
-    if piece[1] == "K":
-        return Check_King_Valid_Moves (position, pieces, piece[0])
-    elif piece[1] == "Q":
-        return Check_Queen_Valid_Moves (position, pieces, piece[0])
-    elif piece[1] == "N":
-        return Check_Knight_Valid_Moves (position, pieces, piece[0])
-    elif piece[1] == "B":
-        return Check_Bishop_Valid_Moves (position, pieces, piece[0])
-    elif piece[1] == "R":
-        return Check_Rook_Valid_Moves (position, pieces, piece[0])
-    elif piece[1] == "P":
-        return Check_Pawn_Valid_Moves (position, pieces, piece[0], last_move)
+def Get_Basic_Moves(piece, pos, pieces, last_move, skip_king=False):
+    # Piece letter
+    piece_type = piece[1]
+    # Return raw moves, ignoring checks
+    if piece_type == "K":
+        if skip_king:
+            return []
+        return Check_King_Valid_Moves(pos, pieces, piece[0])
+    if piece_type == "Q":
+        return Check_Queen_Valid_Moves(pos, pieces, piece[0])
+    if piece_type == "N":
+        return Check_Knight_Valid_Moves(pos, pieces, piece[0])
+    if piece_type == "B":
+        return Check_Bishop_Valid_Moves(pos, pieces, piece[0])
+    if piece_type == "R":
+        return Check_Rook_Valid_Moves(pos, pieces, piece[0])
+    if piece_type == "P":
+        return Check_Pawn_Valid_Moves(pos, pieces, piece[0], last_move)
     return []
 
-# endregion
+def Is_In_Check(pieces, color):
+    # Find king
+    king_piece = None
+    for p, king_pos in pieces.items():
+        if p.startswith(color[0]) and p[1] == "K":
+            king_piece = (p, king_pos)
+            break
+    if not king_piece:
+        return False
 
-#region Fundamental logics(Promote_Pawn())
+    king_pos = king_piece[1]
+    # Check if any enemy piece can capture king_pos
+    opponent_color = "white" if color == "black" else "black"
+    for p, pos in pieces.items():
+        if p.startswith(opponent_color[0]):
+            # Use basic moves ignoring check
+            enemy_moves = Get_Basic_Moves(p, pos, pieces, last_move)
+            if king_pos in enemy_moves:
+                return True
+    return False
 
+def Calculate_Valid_Moves(piece, position, pieces, last_move):
+    candidate_moves = Get_Basic_Moves(piece, position, pieces, last_move)
+    safe_moves = []
+    color = "white" if piece.startswith("w") else "black"
+
+    old_pos = pieces[piece]
+    for move_pos in candidate_moves:
+        captured_piece = None
+        if move_pos in pieces.values():
+            for op, opos in pieces.items():
+                if opos == move_pos:
+                    captured_piece = op
+                    break
+
+        pieces[piece] = move_pos
+        if captured_piece:
+            del pieces[captured_piece]
+
+        # Always verify king safety, even if not currently in check
+        if not Is_In_Check(pieces, color):
+            safe_moves.append(move_pos)
+
+        pieces[piece] = old_pos
+        if captured_piece:
+            pieces[captured_piece] = move_pos
+
+    return safe_moves
+
+def Is_Checkmate(pieces, color):
+    # If not in check, no need to check for checkmate
+    if not Is_In_Check(pieces, color):
+        return False
+
+    # Try every piece of 'color'; if any valid move leads out of check, not checkmate
+    for p, pos in pieces.items():
+        if p.startswith(color[0]):
+            moves = Calculate_Valid_Moves(p, pos, pieces, last_move)
+            if moves:
+                return False
+    return True
+#endregion
+
+#region Pawn Promotion
 def Promote_Pawn(canvas, piece, position, turn):
     promotion_panel = tk.Frame(canvas.master)
     promotion_panel.place(x=200, y=200)
@@ -326,64 +442,54 @@ def Promote_Pawn(canvas, piece, position, turn):
             command=lambda pt=piece_type: promote_to(pt)
         )
         button.pack(pady=5)
+#endregion
 
-# endregion
-#region Game Over (Display_Game_Over() + Restart_Game())
+#region Game Over
 def Display_Game_Over(canvas, message):
-    # Clear the canvas
     canvas.delete("all")
-    
-    # Display the game-over message
     canvas.create_text(200, 150, text=message, font=("Arial", 24), fill="red")
     canvas.create_text(200, 200, text="Click 'Try Again' to restart", font=("Arial", 16), fill="black")
-    
-    # Add "Try Again" button outside the canvas clearing process
-    try_again_button = tk.Button(
-        canvas.master, 
-        text="Try Again", 
-        font=("Arial", 14), 
-        command=lambda: Restart_Game(canvas)
-    )
-    # Place the button relative to the window, not the canvas
+    try_again_button = tk.Button(canvas.master, text="Try Again", font=("Arial", 14), command=lambda: Restart_Game(canvas))
     try_again_button.place(x=150, y=250)
 
-def Restart_Game (canvas):
-    Initialization ()
-    canvas.delete ("all")
-    Draw_Chessboard (canvas, pieces, valid_moves)
+def Restart_Game(canvas):
+    Initialization()
+    canvas.delete("all")
+    Draw_Chessboard(canvas, pieces, valid_moves)
+    for widget in canvas.master.winfo_children():
+        if isinstance(widget, tk.Button):
+            widget.destroy()
+    Update_Material_Panel()
+#endregion
 
-    for widget in canvas.master.winfo_children ():
-        if isinstance (widget, tk.Button):
-            widget.destroy ()
-
-    Update_Material_Panel ()
-
-# endregion
-
-#region Main   
+#region Main
 if __name__ == "__main__":
     window = tk.Tk()
     window.title("Chessboard")
 
     canvas = tk.Canvas(window, width=400, height=400)
-    canvas.pack()
+    canvas.pack(side="right")
 
     top_panel = tk.Frame(window)
-    top_panel.pack(side = "top")
+    top_panel.pack(side="top")
 
     bottom_panel = tk.Frame(window)
-    bottom_panel.pack(side = "bottom")
+    bottom_panel.pack(side="bottom")
 
-    white_material_label = tk.Label(top_panel, text="White material: ", font = ("Arial", 14))
-    white_material_label.pack(side = "left")
+    left_panel = tk.Frame(window)
+    left_panel.pack(side="left", fill="y")
 
-    black_material_label = tk.Label(bottom_panel, text="Black material: ", font = ("Arial", 14))
-    black_material_label.pack(side = "left")
+    white_material_label = tk.Label(top_panel, text="White material: ", font=("Arial", 14))
+    white_material_label.pack(side="left")
+
+    black_material_label = tk.Label(bottom_panel, text="Black material: ", font=("Arial", 14))
+    black_material_label.pack(side="left")
+
+    move_history_text = tk.Text(left_panel, width=30, height=25, state=tk.DISABLED)
+    move_history_text.pack(side="left", fill="y")
 
     Initialization()
-
     Draw_Chessboard(canvas, pieces, valid_moves)
-
     canvas.bind("<Button-1>", lambda event: On_Canvas_Click(event, canvas, pieces, turn))
 
     window.mainloop()
