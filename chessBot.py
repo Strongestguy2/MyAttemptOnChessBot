@@ -1,36 +1,52 @@
 import tkinter as tk
 
-#region Initialization
+#region Initialization(Initialization(), Fen_To_Board(fen))
 def Initialization():
     global pieces, turn, selected_piece, valid_moves, captured_white, captured_black, material_difference, MATERIAL_VALUES, last_move, moved, move_history
 
-    pieces = {
-        "wK": (4, 7), "bK": (4, 0), "wQ": (3, 7), "bQ": (3, 0),
-        "wN1": (1, 7), "wN2": (6, 7), "bN1": (1, 0), "bN2": (6, 0),
-        "wB1": (2, 7), "wB2": (5, 7), "bB1": (2, 0), "bB2": (5, 0),
-        "wR1": (0, 7), "wR2": (7, 7), "bR1": (0, 0), "bR2": (7, 0),
-        "wP1": (0, 6), "wP2": (1, 6), "wP3": (2, 6), "wP4": (3, 6),
-        "wP5": (4, 6), "wP6": (5, 6), "wP7": (6, 6), "wP8": (7, 6),
-        "bP1": (0, 1), "bP2": (1, 1), "bP3": (2, 1), "bP4": (3, 1),
-        "bP5": (4, 1), "bP6": (5, 1), "bP7": (6, 1), "bP8": (7, 1),
-    }
+    starting_position = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"
+    pieces, turn, moved = Fen_To_Board(starting_position)
 
     MATERIAL_VALUES = {
         "K": 0, "Q": 10, "N": 3, "B": 3, "R": 5, "P": 1,
     }
 
-    turn = ["white"]
     selected_piece = None
     valid_moves = []
     captured_white = []
     captured_black = []
     material_difference = 0
     last_move = []
-    moved = {p: False for p in pieces}
     move_history = []
+    
+    
+def Fen_To_Board(fen):
+    pieces = {}
+    rows = fen.split(' ')[0].split('/')
+    turn = ["white" if fen.split(' ')[1] == 'w' else "black"]
+    moved = {}
+
+    piece_type_from_symbol = {
+        'k': 'K', 'p': 'P', 'n': 'N', 'b': 'B', 'r': 'R', 'q': 'Q'
+    }
+
+    for row in range(8):
+        col = 0
+        for char in rows[row]:
+            if char.isdigit():
+                col += int(char)
+            else:
+                color = 'w' if char.isupper() else 'b'
+                piece_type = piece_type_from_symbol[char.lower()]
+                piece_id = f"{color}{piece_type}{len([p for p in pieces if p.startswith(color + piece_type)]) + 1}"
+                pieces[piece_id] = (col, row)  # Adjusted row indexing
+                moved[piece_id] = False
+                col += 1
+
+    return pieces, turn, moved
 #endregion
 
-#region UI Functions
+#region UI Functions(Draw_Chessbaord(), On_Canvas_Click(), Update_Material_Panel(), Convert_To_Icon())
 def Draw_Chessboard(canvas, pieces, valid_moves, king_in_check_pos=None):
     square_size = 50
 
@@ -103,7 +119,7 @@ def Convert_To_Icon(piece):
     return icons.get((color, piece_type), piece)
 #endregion
 
-#region Moving Pieces
+#region Moving Pieces(Move_Piece(), Update_Move_History())
 def Move_Piece(canvas, pieces, piece, new_position, turn):
     global material_difference, last_move, move_history
 
@@ -111,12 +127,12 @@ def Move_Piece(canvas, pieces, piece, new_position, turn):
     old_position = pieces[piece]
 
     # Check for en passant
-    if piece[1] == "P" and abs(old_position[1] - new_position[1]) == 1:
+    if piece[1] == "P" and abs(old_position[0] - new_position[0]) == 1 and old_position[1] != new_position[1]:
         captured_position = (new_position[0], old_position[1])
         for other_piece, pos in pieces.items():
             if pos == captured_position and other_piece[1] == "P" and len(last_move) >= 3:
-                last_piece, last_start, last_end = last_move[0]
-                if abs(last_start[1] - last_end[1]) == 2:
+                last_piece, last_start, last_end = last_move
+                if abs(last_start[1] - last_end[1]) == 2 and last_end == captured_position:
                     captured_piece = other_piece
                     break
 
@@ -130,45 +146,38 @@ def Move_Piece(canvas, pieces, piece, new_position, turn):
     if captured_piece:
         del pieces[captured_piece]
         if piece.startswith("w"):
-            captured_black.append(captured_piece)
+            captured_white.append(captured_piece)
             material_difference += MATERIAL_VALUES[captured_piece[1]]
         else:
-            captured_white.append(captured_piece)
+            captured_black.append(captured_piece)
             material_difference -= MATERIAL_VALUES[captured_piece[1]]
         Update_Material_Panel()
 
-    # Handle castling
-    if piece[1] == "K" and abs(old_position[0] - new_position[0]) == 2:
-        if new_position[0] == 6:  # Short castling
-            rook_pos = (7, old_position[1])
-            new_rook_pos = (5, old_position[1])
-        elif new_position[0] == 2:  # Long castling
-            rook_pos = (0, old_position[1])
-            new_rook_pos = (3, old_position[1])
-        rook_piece = [r for r, pos in pieces.items() if pos == rook_pos][0]
-        pieces[rook_piece] = new_rook_pos
-        moved[rook_piece] = True
-
+    # Update piece position
     pieces[piece] = new_position
-    moved[piece] = True
 
-    # Pawn promotion and check for end of game as before
+    # Pawn promotion
     if piece[1] == "P" and (new_position[1] == 0 or new_position[1] == 7):
-        Promote_Pawn(canvas, piece, new_position, turn)
+        Promote_Pawn(canvas, pieces, piece, new_position, turn)
         return
 
-    last_move[:] = [(piece, old_position, new_position)]
+    # Record the last move
+    last_move[:] = [piece, old_position, new_position]
     move_history.append(f"{piece}: {old_position} -> {new_position}")
     Update_Move_History()
 
-    if "wK" not in pieces:
+    # Check for game over
+    if "wK1" not in pieces:
         Display_Game_Over(canvas, "Black wins!")
-    elif "bK" not in pieces:
+        for x in pieces:
+            print (x)
+        return
+    elif "bK1" not in pieces:
         Display_Game_Over(canvas, "White wins!")
-    else:
-        turn[0] = "black" if turn[0] == "white" else "white"
+        return
 
-    canvas.delete("all")
+    # Switch turn
+    turn[0] = "black" if turn[0] == "white" else "white"
 
     # Check if the new side is in check
     if Is_In_Check(pieces, turn[0]):
@@ -186,6 +195,8 @@ def Move_Piece(canvas, pieces, piece, new_position, turn):
             Draw_Chessboard(canvas, pieces, [], king_in_check_pos=king_pos)
             return
 
+    # Redraw board
+    canvas.delete("all")
     Draw_Chessboard(canvas, pieces, [])
 
 def Update_Move_History():
@@ -195,7 +206,7 @@ def Update_Move_History():
     move_history_text.config(state=tk.DISABLED)
 #endregion
 
-#region Moves & Checks
+#region Checks(Is_Square_Attacked(), Get_Basic_Moves(), Is_In_Check(), Calculate_Valid_Moves(), Is_Checkmate())
 def Is_Square_Attacked(pieces, pos, color, visited=None):
     if visited is None:
         visited = set()
@@ -214,6 +225,90 @@ def Is_Square_Attacked(pieces, pos, color, visited=None):
                 return True
     return False
 
+def Get_Basic_Moves(piece, pos, pieces, last_move, skip_king=False):
+    # Piece letter
+    piece_type = piece[1]
+    # Return raw moves, ignoring checks
+    if piece_type == "K":
+        if skip_king:
+            return []
+        return Check_King_Valid_Moves(pos, pieces, piece[0])
+    if piece_type == "Q":
+        return Check_Queen_Valid_Moves(pos, pieces, piece[0])
+    if piece_type == "N":
+        return Check_Knight_Valid_Moves(pos, pieces, piece[0])
+    if piece_type == "B":
+        return Check_Bishop_Valid_Moves(pos, pieces, piece[0])
+    if piece_type == "R":
+        return Check_Rook_Valid_Moves(pos, pieces, piece[0])
+    if piece_type == "P":
+        return Check_Pawn_Valid_Moves(pos, pieces, piece[0], last_move)
+    return []
+
+def Is_In_Check(pieces, color):
+    # Find king
+    king_piece = None
+    for p, king_pos in pieces.items():
+        if p.startswith(color[0]) and p[1] == "K":
+            king_piece = (p, king_pos)
+            break
+    if not king_piece:
+        return False
+
+    king_pos = king_piece[1]
+    # Check if any enemy piece can capture king_pos
+    opponent_color = "white" if color == "black" else "black"
+    for p, pos in pieces.items():
+        if p.startswith(opponent_color[0]):
+            # Use basic moves ignoring check
+            enemy_moves = Get_Basic_Moves(p, pos, pieces, last_move)
+            if king_pos in enemy_moves:
+                return True
+    return False
+
+def Calculate_Valid_Moves(piece, position, pieces, last_move):
+    candidate_moves = Get_Basic_Moves(piece, position, pieces, last_move)
+    safe_moves = []
+    color = "white" if piece.startswith("w") else "black"
+
+    old_pos = pieces[piece]
+    for move_pos in candidate_moves:
+        captured_piece = None
+        if move_pos in pieces.values():
+            for op, opos in pieces.items():
+                if opos == move_pos:
+                    captured_piece = op
+                    break
+
+        pieces[piece] = move_pos
+        if captured_piece:
+            del pieces[captured_piece]
+
+        # Always verify king safety, even if not currently in check
+        if not Is_In_Check(pieces, color):
+            safe_moves.append(move_pos)
+
+        pieces[piece] = old_pos
+        if captured_piece:
+            pieces[captured_piece] = move_pos
+
+    return safe_moves
+
+def Is_Checkmate(pieces, color):
+    # If not in check, no need to check for checkmate
+    if not Is_In_Check(pieces, color):
+        return False
+
+    # Try every piece of 'color'; if any valid move leads out of check, not checkmate
+    for p, pos in pieces.items():
+        if p.startswith(color[0]):
+            moves = Calculate_Valid_Moves(p, pos, pieces, last_move)
+            if moves:
+                return False
+    return True
+#endregion
+
+#region Check Pieces Valid Moves
 def Check_King_Valid_Moves(position, pieces, turn):
     safe_moves = []
     color = "white" if turn == "w" else "black"
@@ -309,114 +404,35 @@ def Check_Rook_Valid_Moves(position, pieces, turn):
 
 def Check_Pawn_Valid_Moves(position, pieces, turn, last_move):
     moves = []
-    direction = -1 if turn == "w" else 1
-    start_row = 6 if turn == "w" else 1
+    x, y = position
 
-    new_position = (position[0], position[1] + direction)
-    if 0 <= new_position[1] < 8 and new_position not in pieces.values():
-        moves.append(new_position)
+    # Forward move by 1
+    forward_step = -1 if turn == 'w' else 1
+    if 0 <= y + forward_step < 8 and not any(pieces.get(p) == (x, y + forward_step) for p in pieces):
+        moves.append((x, y + forward_step))
 
-    if position[1] == start_row:
-        double_step = (position[0], position[1] + 2 * direction)
-        if new_position not in pieces.values() and double_step not in pieces.values():
-            moves.append(double_step)
+        # First move can advance 2
+        if (turn == 'w' and y == 6) or (turn == 'b' and y == 1):
+            if not any(pieces.get(p) == (x, y + 2 * forward_step) for p in pieces):
+                moves.append((x, y + 2 * forward_step))
 
+    # Diagonal captures
     for dx in [-1, 1]:
-        captured_position = (position[0] + dx, position[1] + direction)
-        if 0 <= captured_position[0] < 8 and 0 <= captured_position[1] < 8:
-            if any(pieces.get(p) == captured_position for p in pieces if not p.startswith(turn)):
-                moves.append(captured_position)
+        nx, ny = x + dx, y + forward_step
+        if 0 <= nx < 8 and 0 <= ny < 8:
+            # Normal capture
+            if any(pieces.get(p) == (nx, ny) and not p.startswith(turn) for p in pieces):
+                moves.append((nx, ny))
+            # En passant
+            if last_move and len(last_move) >= 3:
+                last_piece, last_start, last_end = last_move
+                if last_piece[1] == 'P' and abs(last_start[1] - last_end[1]) == 2:
+                    if (nx, ny) == (last_end[0], last_end[1] + forward_step):
+                        if any(pieces.get(p) == last_end for p in pieces):
+                            moves.append((nx, ny))
 
-            if last_move and len(last_move) > 0 and last_move[0][0][1] == "P":
-                last_start = last_move[0][1]
-                last_end = last_move[0][2]
-                if abs(last_start[1] - last_end[1]) == 2 and last_end == (position[0] + dx, position[1]):
-                    en_passant_position = (position[0] + dx, position[1] + direction)
-                    moves.append(en_passant_position)  # Add en passant capture move
-    
     return moves
 
-def Get_Basic_Moves(piece, pos, pieces, last_move, skip_king=False):
-    # Piece letter
-    piece_type = piece[1]
-    # Return raw moves, ignoring checks
-    if piece_type == "K":
-        if skip_king:
-            return []
-        return Check_King_Valid_Moves(pos, pieces, piece[0])
-    if piece_type == "Q":
-        return Check_Queen_Valid_Moves(pos, pieces, piece[0])
-    if piece_type == "N":
-        return Check_Knight_Valid_Moves(pos, pieces, piece[0])
-    if piece_type == "B":
-        return Check_Bishop_Valid_Moves(pos, pieces, piece[0])
-    if piece_type == "R":
-        return Check_Rook_Valid_Moves(pos, pieces, piece[0])
-    if piece_type == "P":
-        return Check_Pawn_Valid_Moves(pos, pieces, piece[0], last_move)
-    return []
-
-def Is_In_Check(pieces, color):
-    # Find king
-    king_piece = None
-    for p, king_pos in pieces.items():
-        if p.startswith(color[0]) and p[1] == "K":
-            king_piece = (p, king_pos)
-            break
-    if not king_piece:
-        return False
-
-    king_pos = king_piece[1]
-    # Check if any enemy piece can capture king_pos
-    opponent_color = "white" if color == "black" else "black"
-    for p, pos in pieces.items():
-        if p.startswith(opponent_color[0]):
-            # Use basic moves ignoring check
-            enemy_moves = Get_Basic_Moves(p, pos, pieces, last_move)
-            if king_pos in enemy_moves:
-                return True
-    return False
-
-def Calculate_Valid_Moves(piece, position, pieces, last_move):
-    candidate_moves = Get_Basic_Moves(piece, position, pieces, last_move)
-    safe_moves = []
-    color = "white" if piece.startswith("w") else "black"
-
-    old_pos = pieces[piece]
-    for move_pos in candidate_moves:
-        captured_piece = None
-        if move_pos in pieces.values():
-            for op, opos in pieces.items():
-                if opos == move_pos:
-                    captured_piece = op
-                    break
-
-        pieces[piece] = move_pos
-        if captured_piece:
-            del pieces[captured_piece]
-
-        # Always verify king safety, even if not currently in check
-        if not Is_In_Check(pieces, color):
-            safe_moves.append(move_pos)
-
-        pieces[piece] = old_pos
-        if captured_piece:
-            pieces[captured_piece] = move_pos
-
-    return safe_moves
-
-def Is_Checkmate(pieces, color):
-    # If not in check, no need to check for checkmate
-    if not Is_In_Check(pieces, color):
-        return False
-
-    # Try every piece of 'color'; if any valid move leads out of check, not checkmate
-    for p, pos in pieces.items():
-        if p.startswith(color[0]):
-            moves = Calculate_Valid_Moves(p, pos, pieces, last_move)
-            if moves:
-                return False
-    return True
 #endregion
 
 #region Pawn Promotion
