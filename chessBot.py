@@ -2,7 +2,7 @@ import tkinter as tk
 
 #region Initialization(Initialization(), Fen_To_Board(fen))
 def Initialization():
-    global pieces, turn, selected_piece, valid_moves, captured_white, captured_black, material_difference, MATERIAL_VALUES, last_move, moved, move_history
+    global pieces, turn, selected_piece, valid_moves, captured_white, captured_black, material_difference, MATERIAL_VALUES, last_move, moved, move_history, current_move_index
 
     starting_position = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"
     pieces, turn, moved = Fen_To_Board(starting_position)
@@ -17,8 +17,8 @@ def Initialization():
     captured_black = []
     material_difference = 0
     last_move = []
-    move_history = []
-    
+    move_history = [starting_position]  # Initialize with the starting position
+    current_move_index = 0
     
 def Fen_To_Board(fen):
     pieces = {}
@@ -44,6 +44,31 @@ def Fen_To_Board(fen):
                 col += 1
 
     return pieces, turn, moved
+
+def Board_To_Fen(pieces, turn):
+    board = [["" for _ in range(8)] for _ in range(8)]
+    for piece, (col, row) in pieces.items():
+        board[row][col] = piece[1].lower() if piece[0] == 'b' else piece[1].upper()
+
+    fen_rows = []
+    for row in board:
+        empty_count = 0
+        fen_row = ""
+        for cell in row:
+            if cell == "":
+                empty_count += 1
+            else:
+                if empty_count > 0:
+                    fen_row += str(empty_count)
+                    empty_count = 0
+                fen_row += cell
+        if empty_count > 0:
+            fen_row += str(empty_count)
+        fen_rows.append(fen_row)
+
+    fen_board = "/".join(fen_rows)
+    fen_turn = "b" if turn[0] == "white" else "w"
+    return f"{fen_board} {fen_turn} - - 0 1"
 #endregion
 
 #region UI Functions(Draw_Chessbaord(), On_Canvas_Click(), Update_Material_Panel(), Convert_To_Icon())
@@ -86,6 +111,9 @@ def On_Canvas_Click(event, canvas, pieces, turn):
 
     global selected_piece, valid_moves
 
+    if current_move_index != len(move_history) - 1:
+        return
+
     if selected_piece:
         if clicked_square in valid_moves:
             Move_Piece(canvas, pieces, selected_piece, clicked_square, turn)
@@ -121,7 +149,7 @@ def Convert_To_Icon(piece):
 
 #region Moving Pieces(Move_Piece(), Update_Move_History())
 def Move_Piece(canvas, pieces, piece, new_position, turn):
-    global material_difference, last_move, move_history
+    global material_difference, last_move, move_history, current_move_index
 
     captured_piece = None
     old_position = pieces[piece]
@@ -163,14 +191,13 @@ def Move_Piece(canvas, pieces, piece, new_position, turn):
 
     # Record the last move
     last_move[:] = [piece, old_position, new_position]
-    move_history.append(f"{piece}: {old_position} -> {new_position}")
+    move_history.append(Board_To_Fen(pieces, turn))  # Store the FEN string
+    current_move_index = len(move_history) - 1  # Update the current move index
     Update_Move_History()
 
     # Check for game over
     if "wK1" not in pieces:
         Display_Game_Over(canvas, "Black wins!")
-        for x in pieces:
-            print (x)
         return
     elif "bK1" not in pieces:
         Display_Game_Over(canvas, "White wins!")
@@ -460,7 +487,7 @@ def Promote_Pawn(canvas, piece, position, turn):
         button.pack(pady=5)
 #endregion
 
-#region Game Over
+#region UI
 def Display_Game_Over(canvas, message):
     canvas.delete("all")
     canvas.create_text(200, 150, text=message, font=("Arial", 24), fill="red")
@@ -476,6 +503,24 @@ def Restart_Game(canvas):
         if isinstance(widget, tk.Button):
             widget.destroy()
     Update_Material_Panel()
+
+def Navigate_Move(direction):
+    global current_move_index, pieces, turn, move_history
+
+    if direction == -1 and current_move_index > 0:
+        current_move_index -= 1
+    elif direction == 1 and current_move_index < len(move_history) - 1:
+        current_move_index += 1
+    else:
+        return
+
+    # Load the board state from the FEN string
+    fen = move_history[current_move_index]
+    pieces, turn, moved = Fen_To_Board(fen)
+
+    # Redraw the board
+    canvas.delete("all")
+    Draw_Chessboard(canvas, pieces, valid_moves)
 #endregion
 
 #region Main
@@ -483,26 +528,41 @@ if __name__ == "__main__":
     window = tk.Tk()
     window.title("Chessboard")
 
-    canvas = tk.Canvas(window, width=400, height=400)
-    canvas.pack(side="right")
+    right_panel = tk.Frame(window)
+    right_panel.pack(side="right")
+
+    canvas = tk.Canvas(right_panel, width=400, height=400)
+    canvas.pack(side="top")
 
     top_panel = tk.Frame(window)
     top_panel.pack(side="top")
 
-    bottom_panel = tk.Frame(window)
-    bottom_panel.pack(side="bottom")
-
     left_panel = tk.Frame(window)
-    left_panel.pack(side="left", fill="y")
+    left_panel.pack(side="left")
 
-    white_material_label = tk.Label(top_panel, text="White material: ", font=("Arial", 14))
-    white_material_label.pack(side="left")
+    bottom_frame = tk.Frame(window)
+    bottom_frame.pack(side="bottom")
 
-    black_material_label = tk.Label(bottom_panel, text="Black material: ", font=("Arial", 14))
-    black_material_label.pack(side="left")
+    right_bottom_frame = tk.Frame(right_panel)
+    right_bottom_frame.pack(side="bottom")
+
+    white_material_label = tk.Label(left_panel, text="White material: ", font=("Arial", 14))
+    white_material_label.pack(side = "top")
+
+    black_material_label = tk.Label(left_panel, text="Black material: ", font=("Arial", 14))
+    black_material_label.pack(side="bottom")
 
     move_history_text = tk.Text(left_panel, width=30, height=25, state=tk.DISABLED)
-    move_history_text.pack(side="left", fill="y")
+    move_history_text.pack(side="left", fill = "y")
+
+    back_button = tk.Button(right_bottom_frame, text="←", font=("Arial", 14), command=lambda: Navigate_Move(-1))
+    back_button.pack(side="left", padx=10)
+
+    import_pgn_button = tk.Button(right_bottom_frame, text="Import PGN", font=("Arial", 14))
+    import_pgn_button.pack(side="left", padx=10)
+
+    forward_button = tk.Button(right_bottom_frame, text="→", font=("Arial", 14), command=lambda: Navigate_Move(1))
+    forward_button.pack(side="left", padx=10)
 
     Initialization()
     Draw_Chessboard(canvas, pieces, valid_moves)
