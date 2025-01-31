@@ -40,16 +40,28 @@ def generate_pawn_moves(pawns, color, occupancy):
     if color == "w":
         # Single step forward
         single_step = (pawns >> 8) & ~occupancy
-        # Double step forward from the initial position (rank 2)
-        double_step = ((pawns & np.uint64(0x000000000000FF00)) >> 8) & ~occupancy
-        double_step = (double_step >> 8) & ~occupancy
+        print(f"Single step bitboard for white: {single_step}")
+
+        # Double step forward from rank 6 -> rank 4
+        # Use mask 0x00FF000000000000 for bits 48..55
+        double_step_candidates = (pawns & np.uint64(0x00FF000000000000)) >> 8
+        print(f"Double step candidates bitboard for white: {double_step_candidates}")
+        double_step = (double_step_candidates & ~occupancy) >> 8 & ~occupancy
+        print(f"Double step bitboard for white: {double_step}")
+
         moves |= single_step | double_step
     else:
         # Single step forward
         single_step = (pawns << 8) & ~occupancy
-        # Double step forward from the initial position (rank 7)
-        double_step = ((pawns & np.uint64(0x00FF000000000000)) << 8) & ~occupancy
-        double_step = (double_step << 8) & ~occupancy
+        print(f"Single step bitboard for black: {single_step}")
+
+        # Double step forward from rank 1 -> rank 3
+        # Use mask 0x000000000000FF00 for bits 8..15
+        double_step_candidates = (pawns & np.uint64(0x000000000000FF00)) << 8
+        print(f"Double step candidates bitboard for black: {double_step_candidates}")
+        double_step = (double_step_candidates & ~occupancy) << 8 & ~occupancy
+        print(f"Double step bitboard for black: {double_step}")
+
         moves |= single_step | double_step
 
     print(f"Generated pawn moves for color {color}: {moves}")
