@@ -1,11 +1,14 @@
 import tkinter as tk
+import numpy as np
+from Bitboard import Board_To_Bitboard, Print_Bitboard, generate_pawn_moves, generate_pawn_attacks, generate_knight_moves, generate_bishop_moves, generate_rook_moves, generate_queen_moves, generate_king_moves, Print_All_Bitboards
 
 #region Initialization(Initialization(), Fen_To_Board(fen))
 def Initialization():
-    global pieces, turn, selected_piece, valid_moves, captured_white, captured_black, material_difference, MATERIAL_VALUES, last_move, moved, move_history, current_move_index
+    global pieces, turn, selected_piece, valid_moves, captured_white, captured_black, material_difference, MATERIAL_VALUES, last_move, moved, move_history, current_move_index, bitboards
 
     starting_position = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"
     pieces, turn, moved = Fen_To_Board(starting_position)
+    bitboards = Board_To_Bitboard(pieces)
 
     MATERIAL_VALUES = {
         "K": 0, "Q": 10, "N": 3, "B": 3, "R": 5, "P": 1,
@@ -38,9 +41,8 @@ def Fen_To_Board(fen):
             else:
                 color = 'w' if char.isupper() else 'b'
                 piece_type = piece_type_from_symbol[char.lower()]
-                piece_id = f"{color}{piece_type}{len([p for p in pieces if p.startswith(color + piece_type)]) + 1}"
-                pieces[piece_id] = (col, row)  # Adjusted row indexing
-                moved[piece_id] = False
+                piece_key = (color, piece_type, len([p for p in pieces if p[0] == color and p[1] == piece_type]) + 1)
+                pieces[piece_key] = (col, row)
                 col += 1
 
     return pieces, turn, moved
@@ -125,9 +127,9 @@ def On_Canvas_Click(event, canvas, pieces, turn):
             Draw_Chessboard(canvas, pieces, valid_moves)
     else:
         for piece, position in pieces.items():
-            if position == clicked_square and piece.startswith(turn[0][0]):
+            if position == clicked_square and piece[0] == turn[0][0]:
                 selected_piece = piece
-                valid_moves = Calculate_Valid_Moves(piece, position, pieces, last_move)
+                valid_moves = Calculate_Valid_Moves(piece, position)
                 Draw_Chessboard(canvas, pieces, valid_moves)
                 break
 
@@ -149,12 +151,13 @@ def Convert_To_Icon(piece):
 
 #region Moving Pieces(Move_Piece(), Update_Move_History())
 def Move_Piece(canvas, pieces, piece, new_position, turn):
-    global material_difference, last_move, move_history, current_move_index
+    global material_difference, last_move, move_history, current_move_index, en_passant_target
 
     captured_piece = None
     old_position = pieces[piece]
 
     # Check for en passant
+    en_passant_target = np.uint64(0)
     if piece[1] == "P" and abs(old_position[0] - new_position[0]) == 1 and old_position[1] != new_position[1]:
         captured_position = (new_position[0], old_position[1])
         for other_piece, pos in pieces.items():
@@ -173,7 +176,7 @@ def Move_Piece(canvas, pieces, piece, new_position, turn):
 
     if captured_piece:
         del pieces[captured_piece]
-        if piece.startswith("w"):
+        if piece[0] == "w":
             captured_white.append(captured_piece)
             material_difference += MATERIAL_VALUES[captured_piece[1]]
         else:
@@ -189,17 +192,25 @@ def Move_Piece(canvas, pieces, piece, new_position, turn):
         Promote_Pawn(canvas, pieces, piece, new_position, turn)
         return
 
+    # Set en passant target
+    if piece[1] == "P" and abs(old_position[1] - new_position[1]) == 2:
+        en_passant_target = np.uint64(1) << ((old_position[1] + new_position[1]) // 2 * 8 + old_position[0])
+
     # Record the last move
     last_move[:] = [piece, old_position, new_position]
     move_history.append(Board_To_Fen(pieces, turn))  # Store the FEN string
     current_move_index = len(move_history) - 1  # Update the current move index
     Update_Move_History()
 
+    # Print the bitboard
+    bitboards = Board_To_Bitboard(pieces)
+    Print_Bitboard(bitboards['all'])  # Print only the 'all' bitboard
+
     # Check for game over
-    if "wK1" not in pieces:
+    if not any(p[0] == 'w' and p[1] == 'K' for p in pieces):
         Display_Game_Over(canvas, "Black wins!")
         return
-    elif "bK1" not in pieces:
+    elif not any(p[0] == 'b' and p[1] == 'K' for p in pieces):
         Display_Game_Over(canvas, "White wins!")
         return
 
@@ -211,7 +222,7 @@ def Move_Piece(canvas, pieces, piece, new_position, turn):
         # Find king position for highlighting
         king_pos = None
         for p, pos in pieces.items():
-            if p.startswith(turn[0][0]) and p[1] == "K":
+            if p[0] == turn[0][0] and p[1] == "K":
                 king_pos = pos
                 break
         if Is_Checkmate(pieces, turn[0]):
@@ -234,49 +245,73 @@ def Update_Move_History():
 #endregion
 
 #region Checks(Is_Square_Attacked(), Get_Basic_Moves(), Is_In_Check(), Calculate_Valid_Moves(), Is_Checkmate())
-def Is_Square_Attacked(pieces, pos, color, visited=None):
-    if visited is None:
-        visited = set()
-    key = (tuple(pieces.items()), pos, color)
-    if key in visited:
-        return False
-    visited.add(key)
+def Is_Square_Attacked(square, color):
+    enemy_color = 'b' if color == 'w' else 'w'
+    enemy_pawns = bitboards['p'] if enemy_color == 'b' else bitboards['P']
+    enemy_knights = bitboards['n'] if enemy_color == 'b' else bitboards['N']
+    enemy_bishops = bitboards['b'] if enemy_color == 'b' else bitboards['B']
+    enemy_rooks = bitboards['r'] if enemy_color == 'b' else bitboards['R']
+    enemy_queens = bitboards['q'] if enemy_color == 'b' else bitboards['Q']
+    enemy_kings = bitboards['k'] if enemy_color == 'b' else bitboards['K']
 
-    # Uses Get_Basic_Moves to see if an opponent can capture 'pos'
-    opponent_color = "white" if color == "black" else "black"
-    for p, piece_pos in pieces.items():
-        if p.startswith(opponent_color[0]):
-            # Basic moves without check consideration
-            enemy_moves = Get_Basic_Moves(p, piece_pos, pieces, last_move, skip_king=True)
-            if pos in enemy_moves:
-                return True
+    square_bit = 1 << square
+
+    if generate_pawn_attacks(enemy_pawns, enemy_color) & square_bit:
+        return True
+    if generate_knight_moves(enemy_knights, bitboards['all']) & square_bit:
+        return True
+    if generate_bishop_moves(enemy_bishops, bitboards['all']) & square_bit:
+        return True
+    if generate_rook_moves(enemy_rooks, bitboards['all']) & square_bit:
+        return True
+    if generate_queen_moves(enemy_queens, bitboards['all']) & square_bit:
+        return True
+    if generate_king_moves(enemy_kings, bitboards['all']) & square_bit:
+        return True
     return False
 
-def Get_Basic_Moves(piece, pos, pieces, last_move, skip_king=False):
-    # Piece letter
+def Calculate_Valid_Moves(piece, position):
     piece_type = piece[1]
-    # Return raw moves, ignoring checks
-    if piece_type == "K":
-        if skip_king:
-            return []
-        return Check_King_Valid_Moves(pos, pieces, piece[0])
-    if piece_type == "Q":
-        return Check_Queen_Valid_Moves(pos, pieces, piece[0])
-    if piece_type == "N":
-        return Check_Knight_Valid_Moves(pos, pieces, piece[0])
-    if piece_type == "B":
-        return Check_Bishop_Valid_Moves(pos, pieces, piece[0])
-    if piece_type == "R":
-        return Check_Rook_Valid_Moves(pos, pieces, piece[0])
-    if piece_type == "P":
-        return Check_Pawn_Valid_Moves(pos, pieces, piece[0], last_move)
-    return []
+    color = piece[0]
+    bitboard = np.uint64(1) << (position[1] * 8 + position[0])  # Ensure bitboard is correctly generated
+    occupancy = bitboards['all']
+
+    print(f"Calculating valid moves for {piece} at {position} (bitboard: {bitboard})")
+
+    if piece_type == 'P':
+        # Debug: Check if the pawn is in its starting position
+        starting_position = 1 if color == 'w' else 6
+        if position[1] == starting_position:
+            print(f"Pawn {piece} at {position} is in its starting position (rank {starting_position + 1}).")
+        else:
+            print(f"Pawn {piece} at {position} is NOT in its starting position (should be on rank {starting_position + 1}).")
+
+        moves_bitboard = generate_pawn_moves(bitboard, color, occupancy)
+    elif piece_type == 'N':
+        moves_bitboard = generate_knight_moves(bitboard, occupancy)
+    elif piece_type == 'B':
+        moves_bitboard = generate_bishop_moves(bitboard, occupancy)
+    elif piece_type == 'R':
+        moves_bitboard = generate_rook_moves(bitboard, occupancy)
+    elif piece_type == 'Q':
+        moves_bitboard = generate_queen_moves(bitboard, occupancy)
+    elif piece_type == 'K':
+        moves_bitboard = generate_king_moves(bitboard, occupancy)
+    else:
+        return []
+
+    # Convert bitboard to list of positions
+    valid_moves = []
+    for i in range(64):
+        if (moves_bitboard >> i) & 1:
+            valid_moves.append((i % 8, i // 8))
+    return valid_moves
 
 def Is_In_Check(pieces, color):
     # Find king
     king_piece = None
     for p, king_pos in pieces.items():
-        if p.startswith(color[0]) and p[1] == "K":
+        if p[0] == color[0] and p[1] == "K":
             king_piece = (p, king_pos)
             break
     if not king_piece:
@@ -286,40 +321,12 @@ def Is_In_Check(pieces, color):
     # Check if any enemy piece can capture king_pos
     opponent_color = "white" if color == "black" else "black"
     for p, pos in pieces.items():
-        if p.startswith(opponent_color[0]):
+        if p[0] == opponent_color[0]:
             # Use basic moves ignoring check
-            enemy_moves = Get_Basic_Moves(p, pos, pieces, last_move)
+            enemy_moves = Calculate_Valid_Moves(p, pos)
             if king_pos in enemy_moves:
                 return True
     return False
-
-def Calculate_Valid_Moves(piece, position, pieces, last_move):
-    candidate_moves = Get_Basic_Moves(piece, position, pieces, last_move)
-    safe_moves = []
-    color = "white" if piece.startswith("w") else "black"
-
-    old_pos = pieces[piece]
-    for move_pos in candidate_moves:
-        captured_piece = None
-        if move_pos in pieces.values():
-            for op, opos in pieces.items():
-                if opos == move_pos:
-                    captured_piece = op
-                    break
-
-        pieces[piece] = move_pos
-        if captured_piece:
-            del pieces[captured_piece]
-
-        # Always verify king safety, even if not currently in check
-        if not Is_In_Check(pieces, color):
-            safe_moves.append(move_pos)
-
-        pieces[piece] = old_pos
-        if captured_piece:
-            pieces[captured_piece] = move_pos
-
-    return safe_moves
 
 def Is_Checkmate(pieces, color):
     # If not in check, no need to check for checkmate
@@ -329,137 +336,10 @@ def Is_Checkmate(pieces, color):
     # Try every piece of 'color'; if any valid move leads out of check, not checkmate
     for p, pos in pieces.items():
         if p.startswith(color[0]):
-            moves = Calculate_Valid_Moves(p, pos, pieces, last_move)
+            moves = Calculate_Valid_Moves(p, pos)
             if moves:
                 return False
     return True
-#endregion
-
-#region Check Pieces Valid Moves
-def Check_King_Valid_Moves(position, pieces, turn):
-    safe_moves = []
-    color = "white" if turn == "w" else "black"
-    # Normal king moves
-    for dx in range(-1, 2):
-        for dy in range(-1, 2):
-            if dx == 0 and dy == 0:
-                continue
-            new_position = (position[0] + dx, position[1] + dy)
-            if 0 <= new_position[0] < 8 and 0 <= new_position[1] < 8:
-                if not any(pieces.get(p) == new_position for p in pieces if p.startswith(turn[0])):
-                    if not Is_Square_Attacked(pieces, new_position, color):
-                        safe_moves.append(new_position)
-
-    # Castling
-    king_id = f"{turn}K"
-    if not moved.get(king_id, True):
-        row = 7 if color == "white" else 0
-
-        # Short castling (king-side)
-        # Rook at (7, row)
-        for r, rpos in pieces.items():
-            if r.startswith(turn[0] + "R") and rpos == (7, row) and not moved.get(r, True):
-                if (5, row) not in pieces.values() and (6, row) not in pieces.values():
-                    if not Is_Square_Attacked(pieces, (4, row), color) \
-                       and not Is_Square_Attacked(pieces, (5, row), color) \
-                       and not Is_Square_Attacked(pieces, (6, row), color):
-                        safe_moves.append((6, row))
-
-        # Long castling (queen-side)
-        # Rook at (0, row)
-        for r, rpos in pieces.items():
-            if r.startswith(turn[0] + "R") and rpos == (0, row) and not moved.get(r, True):
-                if (1, row) not in pieces.values() and (2, row) not in pieces.values() and (3, row) not in pieces.values():
-                    if not Is_Square_Attacked(pieces, (4, row), color) \
-                       and not Is_Square_Attacked(pieces, (3, row), color) \
-                       and not Is_Square_Attacked(pieces, (2, row), color):
-                        safe_moves.append((2, row))
-
-    return safe_moves
-
-def Check_Queen_Valid_Moves(position, pieces, turn):
-    moves = []
-    directions = [(1, 1), (1, -1), (-1, 1), (-1, -1), (1, 0), (-1, 0), (0, 1), (0, -1)]
-    for dx, dy in directions:
-        for step in range(1, 8):
-            new_position = (position[0] + step * dx, position[1] + step * dy)
-            if 0 <= new_position[0] < 8 and 0 <= new_position[1] < 8:
-                if any(pieces.get(p) == new_position for p in pieces if p.startswith(turn[0])):
-                    break
-                moves.append(new_position)
-                if any(pieces.get(p) == new_position for p in pieces if not p.startswith(turn[0])):
-                    break
-    return moves
-
-def Check_Knight_Valid_Moves(position, pieces, turn):
-    moves = []
-    directions = [(1, 2), (2, 1), (-1, 2), (-2, 1), (1, -2), (2, -1), (-1, -2), (-2, -1)]
-    for dx, dy in directions:
-        new_position = (position[0] + dx, position[1] + dy)
-        if 0 <= new_position[0] < 8 and 0 <= new_position[1] < 8:
-            if not any(pieces.get(p) == new_position for p in pieces if p.startswith(turn[0])):
-                moves.append(new_position)
-    return moves
-
-def Check_Bishop_Valid_Moves(position, pieces, turn):
-    moves = []
-    directions = [(1, 1), (1, -1), (-1, 1), (-1, -1)]
-    for dx, dy in directions:
-        for step in range(1, 8):
-            new_position = (position[0] + step * dx, position[1] + step * dy)
-            if 0 <= new_position[0] < 8 and 0 <= new_position[1] < 8:
-                if any(pieces.get(p) == new_position for p in pieces if p.startswith(turn[0])):
-                    break
-                moves.append(new_position)
-                if any(pieces.get(p) == new_position for p in pieces if not p.startswith(turn[0])):
-                    break
-    return moves
-
-def Check_Rook_Valid_Moves(position, pieces, turn):
-    moves = []
-    directions = [(1, 0), (-1, 0), (0, 1), (0, -1)]
-    for dx, dy in directions:
-        for step in range(1, 8):
-            new_position = (position[0] + step * dx, position[1] + step * dy)
-            if 0 <= new_position[0] < 8 and 0 <= new_position[1] < 8:
-                if any(pieces.get(p) == new_position for p in pieces if p.startswith(turn[0])):
-                    break
-                moves.append(new_position)
-                if any(pieces.get(p) == new_position for p in pieces if not p.startswith(turn[0])):
-                    break
-    return moves
-
-def Check_Pawn_Valid_Moves(position, pieces, turn, last_move):
-    moves = []
-    x, y = position
-
-    # Forward move by 1
-    forward_step = -1 if turn == 'w' else 1
-    if 0 <= y + forward_step < 8 and not any(pieces.get(p) == (x, y + forward_step) for p in pieces):
-        moves.append((x, y + forward_step))
-
-        # First move can advance 2
-        if (turn == 'w' and y == 6) or (turn == 'b' and y == 1):
-            if not any(pieces.get(p) == (x, y + 2 * forward_step) for p in pieces):
-                moves.append((x, y + 2 * forward_step))
-
-    # Diagonal captures
-    for dx in [-1, 1]:
-        nx, ny = x + dx, y + forward_step
-        if 0 <= nx < 8 and 0 <= ny < 8:
-            # Normal capture
-            if any(pieces.get(p) == (nx, ny) and not p.startswith(turn) for p in pieces):
-                moves.append((nx, ny))
-            # En passant
-            if last_move and len(last_move) >= 3:
-                last_piece, last_start, last_end = last_move
-                if last_piece[1] == 'P' and abs(last_start[1] - last_end[1]) == 2:
-                    if (nx, ny) == (last_end[0], last_end[1] + forward_step):
-                        if any(pieces.get(p) == last_end for p in pieces):
-                            moves.append((nx, ny))
-
-    return moves
-
 #endregion
 
 #region Pawn Promotion
