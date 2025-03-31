@@ -2,6 +2,7 @@ from typing import Optional, Tuple, List, Set
 from Move import Move
 
 class Board:
+
     def __init__(self):
         self.board = [
             ['r', 'n', 'b', 'q', 'k', 'b', 'n', 'r'],
@@ -20,6 +21,7 @@ class Board:
         self.halfmove_clock = 0
         self.fullmove_number = 1
         self.move_history = []
+        self.position_history = {}
 
 
     def Print_Board (self):
@@ -31,6 +33,13 @@ class Board:
         print (f"en passant square: {self.en_passant_square}")
         print (f"halfmove clock: {self.halfmove_clock}")
         print (f"fullmove number: {self.fullmove_number}")
+    
+    def Hash_Board (self) -> str:
+        rows = ["".join(row) for row in self.board]
+        board_str = "/".join(rows)
+        castling = "".join(sorted(self.castling_rights))
+        extras = f"{self.white_to_move}_{castling}_{self.en_passant_square}"
+        return board_str + "_" + extras
     
     def Get_Pseudo_Legal_Moves (self, include_castling = True) -> list:
         moves = []
@@ -47,20 +56,22 @@ class Board:
         return moves
     
     def _Generate_Piece_Moves (self, piece: str, row: int, col: int, moves: list, include_castling = True):
-        if piece == 'P':
+        piece_type = piece.upper()
+
+        if piece_type == 'P':
             self._Generate_Pawn_Moves (row, col, moves)
-        elif piece == 'N':
+        elif piece_type == 'N':
             self._Generate_Knight_Moves (row, col, moves)
-        elif piece == 'B':
+        elif piece_type == 'B':
             self._Generate_Bishop_Moves (row, col, moves)
-        elif piece == 'R':
+        elif piece_type == 'R':
             self._Generate_Rook_Moves (row, col, moves)
-        elif piece == 'Q':
+        elif piece_type == 'Q':
             self._Generate_Queen_Moves (row, col, moves)
-        elif piece == 'K':
+        elif piece_type == 'K':
             self._Generate_King_Moves (row, col, moves)
         
-        if str (piece).upper() == 'K' and include_castling:
+        if piece_type == 'K' and include_castling:
             if self.white_to_move:
                 self._Get_White_Castling_Moves(moves)
             else:
@@ -156,32 +167,40 @@ class Board:
                 c += dc
 
     def _Get_White_Castling_Moves (self, moves: list):
+        if self.board[7][4] != 'K':
+            return
+        
         if "K" in self.castling_rights:
-            if self.board[7][5] == '.' and self.board[7][6] == '.':
-                if not self._Is_Square_Attacked ((7, 4)) and not self._Is_Square_Attacked ((7, 5)) and not self._Is_Square_Attacked ((7, 6)):
-                    moves.append (Move((7, 4), (7, 6), "K", is_castling=True))
+            if self.board[7][5] == '.' and self.board[7][6] == '.' and self.board[7][7] == 'R':
+                if not self._Is_Square_Attacked((7, 4)) and not self._Is_Square_Attacked((7, 5)) and not self._Is_Square_Attacked((7, 6)):
+                    moves.append(Move((7, 4), (7, 6), "K", is_castling=True))
 
         if "Q" in self.castling_rights:
-            if self.board[7][3] == '.' and self.board[7][2] == '.' and self.board[7][1] == '.':
-                if not self._Is_Square_Attacked ((7, 4)) and not self._Is_Square_Attacked ((7, 3)) and not self._Is_Square_Attacked ((7, 2)):
-                    moves.append (Move((7, 4), (7, 2), "K", is_castling=True))
+            if self.board[7][1] == '.' and self.board[7][2] == '.' and self.board[7][3] == '.' and self.board[7][0] == 'R':
+                if not self._Is_Square_Attacked((7, 4)) and not self._Is_Square_Attacked((7, 3)) and not self._Is_Square_Attacked((7, 2)):
+                    moves.append(Move((7, 4), (7, 2), "K", is_castling=True))
 
     def _Get_Black_Castling_Moves (self, moves: list):
+        if self.board[0][4] != 'k':
+            return
+        
         if "k" in self.castling_rights:
-            if self.board[0][5] == '.' and self.board[0][6] == '.':
+            if self.board[0][5] == '.' and self.board[0][6] == '.' and self.board[0][7] == 'r':
                 if not self._Is_Square_Attacked ((0, 4)) and not self._Is_Square_Attacked ((0, 5)) and not self._Is_Square_Attacked ((0, 6)):
                     moves.append (Move((0, 4), (0, 6), "k", is_castling=True))
 
         if "q" in self.castling_rights:
-            if self.board[0][3] == '.' and self.board[0][2] == '.' and self.board[0][1] == '.':
+            if self.board[0][3] == '.' and self.board[0][2] == '.' and self.board[0][1] == '.' and self.board[0][0] == 'r':
                 if not self._Is_Square_Attacked ((0, 4)) and not self._Is_Square_Attacked ((0, 3)) and not self._Is_Square_Attacked ((0, 2)):
                     moves.append (Move((0, 4), (0, 2), "k", is_castling=True))
 
     def _Is_Square_Attacked (self, position: tuple) -> bool:
+        original_turn = self.white_to_move
+        self.white_to_move = not self.white_to_move
         enemy_moves = []
         self.white_to_move = not self.white_to_move
         enemy_moves = self.Get_Pseudo_Legal_Moves(include_castling=False)
-        self.white_to_move = not self.white_to_move
+        self.white_to_move = original_turn
 
         for move in enemy_moves:
             if move.end == position:
@@ -202,13 +221,8 @@ class Board:
     
     def Is_King_In_Check (self) -> bool:
         king_symbol = 'K' if self.white_to_move else 'k'
-
-        for row in range(8):
-            for col in range(8):
-                if self.board[row][col] == king_symbol:
-                    return self._Is_Square_Attacked ((row, col))
-        
-        return False
+        king_pos = next (((r, c) for r in range(8) for c in range(8) if self.board[r][c] == king_symbol), None)
+        return self._Is_Square_Attacked(king_pos) if king_pos else False
 
     def Find_King (self, white: bool) -> Tuple[int, int]:
         king_symbol = 'K' if white else 'k'
@@ -245,6 +259,9 @@ class Board:
         self.board[to_row][to_col] = move.promotion_choice if move.is_pawn_promotion else move.piece_moved
         self.board[from_row][from_col] = '.'
 
+        key = self.Hash_Board()
+        self.position_history[key] = self.position_history.get(key, 0) + 1
+
         self.white_to_move = not self.white_to_move
 
         if move.piece_captured or move.piece_moved.upper() == "P":
@@ -269,15 +286,18 @@ class Board:
                 self.board[0][3] = 'r'
                 self.board[0][0] = '.'
         
-        if move.piece_moved.upper() == "K":
+        if move.piece_moved == 'K':
             self.castling_rights.discard('K')
             self.castling_rights.discard('Q')
-        elif move.piece_moved.upper() == "R":
-            if move.start == (7, 7):
-                self.castling_rights.discard('K')
-            elif move.start == (7, 0):
+        elif move.piece_moved == 'R':
+            if move.start == (7, 0):
                 self.castling_rights.discard('Q')
-        elif move.piece_moved.upper() == "r":
+            elif move.start == (7, 7):
+                self.castling_rights.discard('K')
+        elif move.piece_moved == 'k':
+            self.castling_rights.discard('k')
+            self.castling_rights.discard('q')
+        elif move.piece_moved == 'r':
             if move.start == (0, 7):
                 self.castling_rights.discard('k')
             elif move.start == (0, 0):
@@ -294,6 +314,21 @@ class Board:
         self.en_passant_square = last_state['en_passant_square']
         self.halfmove_clock = last_state['halfmove_clock']
         self.fullmove_number = last_state['fullmove_number']
+
+        key = self.Hash_Board()
+        if key in self.position_history:
+            self.position_history[key] -= 1
+            if self.position_history[key] == 0:
+                del self.position_history[key]
+
+    def Is_Threefold_Repetition (self) -> bool:
+        key = self.Hash_Board()
+        return self.position_history.get(key, 0) >= 3
+    
+    def Is_Fifty_Move_Rule (self) -> bool:
+        return self.halfmove_clock >= 100
+    
+    
 
 board = Board()
 board.Print_Board()
