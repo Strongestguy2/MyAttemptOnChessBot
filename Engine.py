@@ -9,6 +9,7 @@ LMR_COUNT = 0
 NMP_USED = 0
 KILLER_MOVES = {}
 HISTORY_HEURISTIC = {}
+Q_DEPTH_LIMIT = 4
 
 def Evaluate_Position(board: Board) -> float:
     piece_values = {
@@ -18,6 +19,7 @@ def Evaluate_Position(board: Board) -> float:
 
     score = 0
     endgame = Is_Endgame(board)
+    earlygame = board.fullmove_number <= 5
     score += 10 if board.white_to_move else -10  # tempo bonus
 
     white_pawn_files = [[] for _ in range(8)]
@@ -78,16 +80,19 @@ def Evaluate_Position(board: Board) -> float:
                     score -= 0.5
                 if len(black_pawn_files[col]) > 1:
                     score += 0.25
-
+                
+    score += Evaluate_Development(board)
     score += Evaluate_Pawn_Structure(board)
     score += Evaluate_Open_Files_And_Rooks(board)
     score += Evaluate_King_Safety(board)
     score += Evaluate_Space(board)
     score += Evaluate_Mobility(board)
-    score += Evaluate_Pins(board)
-    score += Evaluate_Forks(board)
-    score += Evaluate_Skewers(board)
-    score += Evaluate_Development(board)
+
+    if not earlygame:
+        score += Evaluate_Pins(board)
+        score += Evaluate_Forks(board)
+        score += Evaluate_Skewers(board)
+    
 
     # Bishop pair bonus
     if sum(p == "B" for row in board.board for p in row) >= 2:
@@ -183,12 +188,6 @@ def Evaluate_Open_Files_And_Rooks (board: Board) -> float:
             for row in range (8):
                 if board.board[row][col] == "r":
                     score -= 0.25
-
-    for col in range (8):
-        if board.board[6][col] == "R":
-            score += 0.4
-        elif board.board[1][col] == "r":
-            score -= 0.4
 
     for col in range (8):
         white_rooks = sum(1 for row in range (8) if board.board[row][col] == "R")
@@ -398,92 +397,145 @@ def Evaluate_Skewers(board: Board) -> float:
                         break
 
     return score
-                        
+
 def Minimax(board: Board, depth: int, alpha: float, beta: float, maximizing: bool) -> float:
     global TRANSPOSITION_TABLE, TRANSPOSITION_HITS
     global KILLER_MOVES, HISTORY_HEURISTIC
-    global NODES_SEARCHED, QUIESCENCE_NODES, LMR_COUNT, NMP_USED
+    global NODES_SEARCHED, QUIESCENCE_NODES, LMR_COUNT, NMP_USED, NODES_SEARCHED
+
     NODES_SEARCHED += 1
 
     if depth == 0:
-        return Quiescence_Search(board, alpha, beta, maximizing)
-    
+        score = Quiescence_Search(board, alpha, beta, maximizing, depth=0)
+        return score if score is not None else 0.0
+
     key = board.Hash_Board()
     if key in TRANSPOSITION_TABLE:
         TRANSPOSITION_HITS += 1
-        return TRANSPOSITION_TABLE[key]
-    
+        tt_score, tt_move = TRANSPOSITION_TABLE[key]
+        return tt_score
+
     legal_moves = board.Generate_Legal_Moves()
+    
+    if key in TRANSPOSITION_TABLE:
+        _, tt_move = TRANSPOSITION_TABLE[key]
+        if tt_move in legal_moves:
+            legal_moves.remove(tt_move)
+            legal_moves.insert(0, tt_move)
+
     legal_moves.sort(key=lambda m: Score_Move(board, m, depth), reverse=maximizing)
 
-    #null move pruning
+    # Null Move Pruning
     if not board.Is_King_In_Check() and depth >= 3:
-        white_pieces = sum (1 for row in board.board for p in row if p.isupper() and p not in "KP.")
-        black_pieces = sum (1 for row in board.board for p in row if p.islower() and p not in "kp.")
-        if white_pieces > 5 and black_pieces > 5:
-            R = 2 if depth < 6 else 3
+        if not Is_Endgame(board):  # ← avoid null move in endgame
+            R = 2
             board.white_to_move = not board.white_to_move
-            null_score = -Minimax(board, depth - R, -beta, -beta + 1, not maximizing)
+            null_score = -Minimax(board, depth - 1 - R, -beta, -beta + 1, not maximizing)
             board.white_to_move = not board.white_to_move
             if null_score >= beta:
                 NMP_USED += 1
                 return beta
-            
+
     if not legal_moves:
         score = -10000 if board.Is_King_In_Check() else 0
         TRANSPOSITION_TABLE[key] = score
         return score
     
+    best_move = None
     best_score = float('-inf') if maximizing else float('inf')
 
     for move_index, move in enumerate(legal_moves):
-        board.Make_Move(move)
+        prev_track = board.track_repetition
+        board.track_repetition = False
+        success = board.Make_Move(move)
         
-        is_quiet = not move.piece_captured
-        do_lmr = is_quiet and depth >= 3 and move_index >= 3
-        search_depth = depth - 1 if do_lmr else depth\
-        
-        if do_lmr:
-            LMR_COUNT += 1
+        if not success:
+            board.track_repetition = prev_track
+            continue
 
-        if move_index == 0:
-            score = Minimax(board, search_depth - 1, alpha, beta, not maximizing)
-        else:
-            score = Minimax(board, search_depth - 1, alpha + 1, alpha, not maximizing)
+        is_quiet = not move.piece_captured and not move.is_pawn_promotion
+
+        # --- Dynamic Late Move Pruning (LMP) ---
+        skip_move = False
+        if is_quiet:
+            if depth <= 5 and move_index >= 8:
+                skip_move = True
+            elif depth >= 6 and move_index >= 10:
+                skip_move = True
+            elif depth >= 8 and move_index >= 12:
+                skip_move = True
+
+        if skip_move:
+            board.Undo_Move()
+            board.track_repetition = prev_track
+            continue
+
+        # --- Dynamic Late Move Reduction (LMR) ---
+        lmr_reduction = 0
+        if is_quiet and move_index >= 3:
+            if depth >= 5:
+                lmr_reduction = 1
+            if depth >= 8:
+                lmr_reduction = 2
+            if depth >= 10:
+                lmr_reduction = 3
+
+        if lmr_reduction > 0:
+            LMR_COUNT += 1
+            score = Minimax(board, depth - lmr_reduction, alpha + 1, alpha, not maximizing)
             if alpha < score < beta:
-                score = Minimax(board, search_depth - 1, alpha, beta, not maximizing)
+                score = Minimax(board, depth - 1, alpha, beta, not maximizing)
+        else:
+            score = Minimax(board, depth - 1, alpha, beta, not maximizing)
 
         board.Undo_Move()
+        board.track_repetition = prev_track
 
         if maximizing:
             if score > best_score:
                 best_score = score
+                best_move = move
             alpha = max(alpha, score)
         else:
             if score < best_score:
                 best_score = score
+                best_move = move
             beta = min(beta, score)
-        
+
         if beta <= alpha:
+            # Killer move heuristic
             if is_quiet:
                 if depth not in KILLER_MOVES:
                     KILLER_MOVES[depth] = []
                 if move not in KILLER_MOVES[depth]:
                     KILLER_MOVES[depth].append(move)
-                    if len (KILLER_MOVES[depth]) > 2:
+                    if len(KILLER_MOVES[depth]) > 2:
                         KILLER_MOVES[depth].pop(0)
+
+            # History heuristic bonus
             key_history = (move.start, move.end)
             HISTORY_HEURISTIC[key_history] = HISTORY_HEURISTIC.get(key_history, 0) + (depth * depth)
+
             break
 
-    TRANSPOSITION_TABLE[key] = best_score
+    if best_score == float('-inf') and maximizing:
+        return -10000
+    elif best_score == float('inf') and not maximizing:
+        return 10000
+
+    TRANSPOSITION_TABLE[key] = (best_score, best_move)
+    print (f"Node searched: {NODES_SEARCHED}")
     return best_score
 
-def Quiescence_Search (board: Board, alpha: float, beta: float, maximizing: bool) -> float:
+def Quiescence_Search(board: Board, alpha: float, beta: float, maximizing: bool, depth: int = 0) -> float:
     global QUIESCENCE_NODES
     QUIESCENCE_NODES += 1
+
+    if QUIESCENCE_NODES > 50000:
+        return Evaluate_Position(board)
+
     stand_pat = Evaluate_Position(board)
-    
+
     if maximizing:
         if stand_pat >= beta:
             return beta
@@ -493,34 +545,53 @@ def Quiescence_Search (board: Board, alpha: float, beta: float, maximizing: bool
             return alpha
         beta = min(beta, stand_pat)
 
-    capture_moves = [m for m in board.Generate_Legal_Moves() if m.piece_captured and Static_Exchange_Evaluation(board, m) > 0]
-    capture_moves.sort(key = lambda m: Score_Move (board, m), reverse=maximizing)
+    if depth >= Q_DEPTH_LIMIT:
+        return stand_pat
+    
+    capture_moves = []
+    for move in board.Generate_Legal_Moves():
+        if move.piece_captured:
+            see = Static_Exchange_Evaluation (board, move)
+            if see > 0:
+                capture_moves.append(move)
+
+    capture_moves.sort(key=lambda m: (m.piece_captured, m.piece_moved))
 
     for move in capture_moves:
-        board.Make_Move(move)
-        score = Quiescence_Search(board, alpha, beta, not maximizing)
+        success = board.Make_Move(move)
+        if not success:
+            continue
+
+        score = Quiescence_Search(board, alpha, beta, not maximizing, depth + 1)
+
         board.Undo_Move()
 
         if maximizing:
-            alpha = max(alpha, score)
+            if score > alpha:
+                alpha = score
             if alpha >= beta:
                 break
         else:
-            beta = min(beta, score)
+            if score < beta:
+                beta = score
             if beta <= alpha:
                 break
-    
     return alpha if maximizing else beta
 
 def Get_Attackers (board: Board, target_row: int, target_col: int, white: bool):
     "return list of position(row, col piece) that are attacking"
 
+    
     attackers = []
     for r in range(8):
         for c in range(8):
             piece = board.board[r][c]
             if piece == "." or piece.isupper() != white:
                 continue
+
+            if piece.upper() == 'K' and target_row == r and target_col == c:
+                continue  # King cannot attack king
+    
 
             if piece.upper() == "P":
                 direction = -1 if piece.isupper() else 1
@@ -547,27 +618,28 @@ def Static_Exchange_Evaluation (board: Board, move: Move) -> int:
         'p': 100, 'n': 300, 'b': 300, 'r': 500, 'q': 900, 'k': 10000
     }
 
-    def see_recursive (square, attackers_w, attackers_b, side, gain_stack):
+    def see_recursive(square, attackers_w, attackers_b, side, gain_stack):
         attackers = attackers_w if side else attackers_b
         if not attackers:
             return gain_stack[-1] if gain_stack else 0
-        
-        attacker = min (attackers, key=lambda x: value_map.get(x[2], 10000))
+
+        attacker = min(attackers, key=lambda x: value_map.get(x[2], 10000))
         attackers.remove(attacker)
 
         capturing_piece_value = value_map.get(temp_board.board[square[0]][square[1]], 0)
         gain = value_map.get(attacker[2], 0) - capturing_piece_value
         gain_stack.append(gain_stack[-1] - gain if gain_stack else -gain)
 
-        if len(gain_stack) > 10:
+        # 🔥 Limit SEE recursion depth to prevent infinite recursion
+        if len(gain_stack) > 4:
             return gain_stack[-1]
-        
+
         temp_board.board[attacker[0]][attacker[1]] = "."
         temp_board.board[square[0]][square[1]] = attacker[2]
 
-        new_attackers = Get_Attackers(temp_board, *square, white = side)
-        return max (-see_recursive(square, attackers_b, new_attackers, not side, gain_stack), gain_stack[-1])
-    
+        new_attackers = Get_Attackers(temp_board, *square, white=side)
+        return max(-see_recursive(square, attackers_b, new_attackers, not side, gain_stack), gain_stack[-1])
+
     if not move.piece_captured:
         return 0
     
@@ -576,6 +648,20 @@ def Static_Exchange_Evaluation (board: Board, move: Move) -> int:
     attackers_black = Get_Attackers(temp_board, *target_square, white = False)
 
     return see_recursive(target_square, attackers_white, attackers_black, board.white_to_move, [])
+
+def Fast_Static_Exchange_Evaluation (board: Board, move: Move) -> int:
+    piece_values = {
+        'P': 100, 'N': 300, 'B': 300, 'R': 500, 'Q': 900, 'K': 10000,
+        'p': 100, 'n': 300, 'b': 300, 'r': 500, 'q': 900, 'k': 10000
+    }
+
+    if not move.piece_captured:
+        return 0
+    
+    victim_value = piece_values.get(move.piece_captured, 0)
+    attacker_value = piece_values.get(move.piece_moved, 1)
+
+    return victim_value - attacker_value
 
 def Score_Move (board: Board, move: Move, depth: int = 0) -> int:
     "mvv-lva most valuable victim - least valuable attacker"
@@ -587,45 +673,67 @@ def Score_Move (board: Board, move: Move, depth: int = 0) -> int:
     victim = move.piece_captured
     attacker = move.piece_moved
 
+    if move.is_pawn_promotion:
+        return 20000
+    
     if victim:
         victim_value = piece_values.get(victim, 0)
         attacker_value = piece_values.get(attacker, 1)
-        see_bonus = Static_Exchange_Evaluation (board, move)
-        tactical_bonus = 20 if see_bonus >= victim_value else 0
-        return (10 * victim_value) - attacker_value + see_bonus + tactical_bonus
+        see_bonus = Fast_Static_Exchange_Evaluation (board, move)
+        tactical_bonus = 50 if see_bonus >= victim_value else -50
+        return (victim_value - attacker_value) + see_bonus + tactical_bonus + 5000
     
     if depth in KILLER_MOVES and move in KILLER_MOVES[depth]:
-        return 10000
+        return 4000
     
     key = (move.start, move.end)
     return HISTORY_HEURISTIC.get(key, 0)
 
-def Find_Best_Move (board: Board, depth: int) -> Move:
-    best_move = None
-    best_score = float('-inf') if board.white_to_move else float('inf')
+def Find_Best_Move(board: Board, depth: int) -> Move:
+    global NODES_SEARCHED, QUIESCENCE_NODES
+    NODES_SEARCHED = 0
+    QUIESCENCE_NODES = 0
 
     if board.Is_Threefold_Repetition():
         print("Threefold repetition detected. Stalemate.")
         return None
-    
-    for current_depth in range (1, depth + 1):
+
+    WINDOW = 50
+    guess = Evaluate_Position(board)
+
+    for attempt in range(2):
+        if attempt == 0:
+            alpha = guess - WINDOW
+            beta = guess + WINDOW
+        else:
+            alpha = float('-inf')
+            beta = float('inf')
+
+        temp_best_score = float('-inf') if board.white_to_move else float('inf')
+        temp_best_move = None
+
         legal_moves = board.Generate_Legal_Moves()
-        best_this_depth = None
-        score_this_depth = float('-inf') if board.white_to_move else float('inf')
+        legal_moves.sort(key=lambda m: Score_Move(board, m, depth), reverse=board.white_to_move)
 
         for move in legal_moves:
-            board.Make_Move(move)
-            score = Minimax(board, current_depth - 1, float('-inf'), float('inf'), not board.white_to_move)
+            success = board.Make_Move(move)
+            if not success:
+                continue
+            
+            score = Minimax(board, depth - 1, alpha, beta, not board.white_to_move)
+
             board.Undo_Move()
 
-            if (board.white_to_move and score > score_this_depth) or (not board.white_to_move and score < score_this_depth):
-                score_this_depth = score
-                best_this_depth = move
+            if (board.white_to_move and score > temp_best_score) or (not board.white_to_move and score < temp_best_score):
+                temp_best_score = score
+                temp_best_move = move
 
-        if (board.white_to_move and score_this_depth > best_score) or (not board.white_to_move and score_this_depth < best_score):
-            best_score = score_this_depth
-            best_move = best_this_depth
-    return best_move
+        if attempt == 0 and (temp_best_score <= alpha or temp_best_score >= beta):
+            continue
+        else:
+            break
+
+    return temp_best_move
 
 def Is_Endgame (board: Board) -> bool:
     queens = 0
