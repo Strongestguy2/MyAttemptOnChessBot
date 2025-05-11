@@ -53,10 +53,6 @@ class Board:
         import copy
         clone = copy.deepcopy(self)
         clone.white_to_move = white
-
-        # Optionally adjust clocks or castling rights if needed
-        clone.castling_rights = {r for r in clone.castling_rights if r.isupper() == white}
-    
         return clone
     
     def Get_Pseudo_Legal_Moves (self, include_castling = True) -> list:
@@ -162,11 +158,11 @@ class Board:
             r, c = row + dr, col + dc
             if 0 <= r < 8 and 0 <= c < 8:
                 target = self.board[r][c]
-                if target == '.':
-                    moves.append (Move((row, col), (r, c), self.board[row][col]))
-                elif target not in ally_pieces:
-                    if target.lower() != 'k':
-                        moves.append (Move((row, col), (r, c), self.board[row][col], target))
+                if target == '.' or target not in ally_pieces:
+                    test_move = Move((row, col), (r, c), self.board[row][col], target if target != '.' else None)
+                    clone = self.Copy_For_Color(self.white_to_move)
+                    if clone.Make_Move(test_move) and not clone.Is_King_In_Check():
+                        moves.append(test_move)
 
     def _Slide_Moves (self, row: int, col: int, directions: List[Tuple[int, int]], moves: list):
         ally_pieces = [p.upper() for p in "PNBRQK"] if self.white_to_move else [p.lower() for p in "pnbrqk"]
@@ -216,17 +212,62 @@ class Board:
                     moves.append (Move((0, 4), (0, 2), "k", is_castling=True))
 
     def _Is_Square_Attacked(self, position: tuple) -> bool:
-        original_turn = self.white_to_move
-        self.white_to_move = not self.white_to_move
+        row, col = position
+        enemy_pieces = [p.lower() for p in "pnbrqk"] if self.white_to_move else [p.upper() for p in "PNBRQK"]
 
-        # Don't generate castling when checking square safety!
-        enemy_moves = self.Get_Pseudo_Legal_Moves(include_castling=False)
+        directions = [
+            (1, 0), (-1, 0), (0, 1), (0, -1),
+            (1, 1), (1, -1), (-1, 1), (-1, -1)
+        ]
 
-        self.white_to_move = original_turn
+        knight_jumps = [
+            (2, 1), (1, 2), (-1, 2), (-2, 1),
+            (-2, -1), (-1, -2), (1, -2), (2, -1)
+        ]
 
-        for move in enemy_moves:
-            if move.end == position:
-                return True
+        for dr, dc in directions:
+            r, c = row + dr, col + dc
+            while 0 <= r < 8 and 0 <= c < 8:
+                piece = self.board[r][c]
+                if piece == '.':
+                    r += dr
+                    c += dc
+                    continue
+                if piece.isupper() == self.white_to_move:
+                    break
+                if piece.upper() == 'Q':
+                    return True
+                if (dr == 0 or dc == 0) and piece.upper() == 'R':
+                    return True
+                if (dr != 0 and dc != 0) and piece.upper() == 'B':
+                    return True
+                break
+
+        for dr, dc in knight_jumps:
+            r, c = row + dr, col + dc
+            if 0 <= r < 8 and 0 <= c < 8:
+                piece = self.board[r][c]
+                if piece.upper() == 'N' and piece.isupper() != self.white_to_move:
+                    return True
+
+        pawn_dir = -1 if self.white_to_move else 1
+        for dc in [-1, 1]:
+            r, c = row + pawn_dir, col + dc
+            if 0 <= r < 8 and 0 <= c < 8:
+                piece = self.board[r][c]
+                if piece.upper() == 'P' and piece.isupper() != self.white_to_move:
+                    return True
+
+        for dr in [-1, 0, 1]:
+            for dc in [-1, 0, 1]:
+                if dr == 0 and dc == 0:
+                    continue
+                r, c = row + dr, col + dc
+                if 0 <= r < 8 and 0 <= c < 8:
+                    piece = self.board[r][c]
+                    if piece.upper() == 'K' and piece.isupper() != self.white_to_move:
+                        return True
+
         return False
     
     def Generate_Legal_Moves(self, include_castling=True) -> list:
@@ -249,33 +290,11 @@ class Board:
         return legal_moves
     
     def Is_King_In_Check(self) -> bool:
-        king_symbol = 'K' if self.white_to_move else 'k'
-        king_pos = None
-
-        # Find king's position
-        for r in range(8):
-            for c in range(8):
-                if self.board[r][c] == king_symbol:
-                    king_pos = (r, c)
-                    break
-            if king_pos:
-                break
-
-        if not king_pos:
-            print("❗ ERROR: King not found on board!")
-            self.Print_Board()
-            return True  # Fail-safe: assume check if king missing
-
-        # Check if enemy pieces attack the king's square
-        original_turn = self.white_to_move
-        self.white_to_move = not original_turn
-        enemy_moves = self.Get_Pseudo_Legal_Moves(include_castling=False)
-        self.white_to_move = original_turn
-
-        for move in enemy_moves:
-            if move.end == king_pos:
-                return True
-        return False
+        self.white_to_move = not self.white_to_move  # temporarily flip
+        king_pos = self.Find_King(self.white_to_move)
+        in_check = self._Is_Square_Attacked(king_pos)
+        self.white_to_move = not self.white_to_move  # flip back
+        return in_check
 
     def Find_King (self, white: bool) -> Tuple[int, int]:
         king_symbol = 'K' if white else 'k'
@@ -355,7 +374,6 @@ class Board:
         elif move.piece_moved == 'r' and move.start == (0, 7) and 'k' in self.castling_rights:
             self.castling_rights.discard('k')
 
-        # ✅ FINAL CHECK to prevent leaving king in check
         if self.Is_King_In_Check():
             self.Undo_Move()
             return False
