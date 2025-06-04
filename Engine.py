@@ -1,5 +1,6 @@
 from Board import Board, Move
 from tables import PAWN_TABLE, KNIGHT_TABLE, BISHOP_TABLE, ROOK_TABLE, QUEEN_TABLE, KING_MID_TABLE, KING_END_TABLE
+import math
 
 TRANSPOSITION_TABLE = {}
 TRANSPOSITION_HITS = 0
@@ -9,10 +10,19 @@ LMR_COUNT = 0
 NMP_USED = 0
 KILLER_MOVES = {}
 HISTORY_HEURISTIC = {}
-Q_DEPTH_LIMIT = 4
+Q_DEPTH_LIMIT = 2
 MATE_SCORE = 10000
+MINIMAX_TIME = 0
+QUIESCENCE_TIME = 0
+SEE_TIME = 0
+FAST_SEE_TIME = 0
+EVALUATE_POSITION_TIME = 0
 
 def Evaluate_Position(board: Board) -> float:
+    global EVALUATE_POSITION_TIME
+    import time
+    t0 = time.perf_counter()
+
     piece_values = {
         'P': 10, 'N': 30, 'B': 30, 'R': 50, 'Q': 90, 'K': 900,
         'p': -10, 'n': -30, 'b': -30, 'r': -50, 'q': -90, 'k': -900
@@ -42,6 +52,7 @@ def Evaluate_Position(board: Board) -> float:
 
             score += piece_values.get(piece, 0)
 
+            '''
             # Piece-square tables
             table_row = row if piece.isupper() else 7 - row
             if piece.upper() == "P":
@@ -57,6 +68,7 @@ def Evaluate_Position(board: Board) -> float:
             elif piece.upper() == "K":
                 king_table = KING_END_TABLE if endgame else KING_MID_TABLE
                 score += king_table[table_row][col] * (1 if piece.isupper() else -1)
+            '''
 
             # Center control
             if (row, col) in {(3, 3), (3, 4), (4, 3), (4, 4)}:
@@ -81,13 +93,15 @@ def Evaluate_Position(board: Board) -> float:
                     score -= 0.5
                 if len(black_pawn_files[col]) > 1:
                     score += 0.25
-                
+            
+    
     score += Evaluate_Development(board)
     score += Evaluate_Pawn_Structure(board)
     score += Evaluate_Open_Files_And_Rooks(board)
     score += Evaluate_King_Safety(board)
     score += Evaluate_Space(board)
     score += Evaluate_Mobility(board)
+    
 
     if not earlygame:
         score += Evaluate_Pins(board)
@@ -119,6 +133,9 @@ def Evaluate_Position(board: Board) -> float:
                 see_score = Static_Exchange_Evaluation(board, dummy_move)
                 if see_score < 0:
                     score += see_score / 10  # small penalty to avoid hanging
+
+    t1 = time.perf_counter()
+    EVALUATE_POSITION_TIME += t1 - t0
 
     return score
 
@@ -403,29 +420,33 @@ def Minimax(board: Board, depth: int, alpha: float, beta: float, maximizing: boo
     global TRANSPOSITION_TABLE, TRANSPOSITION_HITS
     global KILLER_MOVES, HISTORY_HEURISTIC
     global NODES_SEARCHED, QUIESCENCE_NODES, LMR_COUNT, NMP_USED
+    global MINIMAX_TIME
 
     NODES_SEARCHED += 1
+    import time
+    t0 = time.perf_counter()
 
     if depth == 0:
         score = Quiescence_Search(board, alpha, beta, maximizing, depth=0)
+        t1 = time.perf_counter()
+        MINIMAX_TIME += t1 - t0
         return score if score is not None else 0.0
+
+    legal_moves = board.Generate_Legal_Moves()
+
+    legal_moves.sort(key=lambda m: Score_Move(board, m, depth), reverse=maximizing)
 
     key = board.Hash_Board()
     if key in TRANSPOSITION_TABLE:
         TRANSPOSITION_HITS += 1
         tt_score, tt_move = TRANSPOSITION_TABLE[key]
-        return tt_score
-
-    legal_moves = board.Generate_Legal_Moves()
-
-    if key in TRANSPOSITION_TABLE:
-        _, tt_move = TRANSPOSITION_TABLE[key]
         if tt_move in legal_moves:
             legal_moves.remove(tt_move)
             legal_moves.insert(0, tt_move)
-
-    legal_moves.sort(key=lambda m: Score_Move(board, m, depth), reverse=maximizing)
-
+        t1 = time.perf_counter()
+        MINIMAX_TIME += t1 - t0
+        return tt_score
+    
     # Null Move Pruning
     if not board.Is_King_In_Check() and depth >= 3 and not Is_Endgame(board):
         R = 2
@@ -434,11 +455,15 @@ def Minimax(board: Board, depth: int, alpha: float, beta: float, maximizing: boo
         board.white_to_move = not board.white_to_move
         if null_score >= beta:
             NMP_USED += 1
+            t1 = time.perf_counter()
+            MINIMAX_TIME += t1 - t0
             return beta
 
     if not legal_moves:
-        score = -MATE_SCORE if board.Is_King_In_Check() else 0
+        score = -10000 if board.Is_King_In_Check() else 0
         TRANSPOSITION_TABLE[key] = (score, None)
+        t1 = time.perf_counter()
+        MINIMAX_TIME += t1 - t0
         return score
 
     best_move = None
@@ -456,13 +481,8 @@ def Minimax(board: Board, depth: int, alpha: float, beta: float, maximizing: boo
 
         # Late Move Pruning
         skip_move = False
-        if is_quiet:
-            if depth <= 5 and move_index >= 8:
-                skip_move = True
-            elif depth >= 6 and move_index >= 10:
-                skip_move = True
-            elif depth >= 8 and move_index >= 12:
-                skip_move = True
+        if depth >= 4 and move_index >= 4 and is_quiet:
+            skip_move = True
 
         if skip_move:
             board.Undo_Move()
@@ -471,13 +491,8 @@ def Minimax(board: Board, depth: int, alpha: float, beta: float, maximizing: boo
 
         # LMR
         lmr_reduction = 0
-        if is_quiet and move_index >= 3:
-            if depth >= 5:
-                lmr_reduction = 1
-            if depth >= 8:
-                lmr_reduction = 2
-            if depth >= 10:
-                lmr_reduction = 3
+        if is_quiet and move_index >= 3 and depth >= 3:
+            lmr_reduction = int((math.log(depth) * math.log(move_index + 1)) / 2)
 
         # Apply PVS
         if move_index == 0 or depth < 4:
@@ -522,40 +537,57 @@ def Minimax(board: Board, depth: int, alpha: float, beta: float, maximizing: boo
             break
 
     if best_score == float('-inf') and maximizing:
-        return -MATE_SCORE
+        t1 = time.perf_counter()
+        MINIMAX_TIME += t1 - t0
+        return -10000
     elif best_score == float('inf') and not maximizing:
-        return MATE_SCORE
+        t1 = time.perf_counter()
+        MINIMAX_TIME += t1 - t0
+        return 10000
 
     TRANSPOSITION_TABLE[key] = (best_score, best_move)
+    t1 = time.perf_counter()
+    MINIMAX_TIME += t1 - t0
     return best_score
 
 def Quiescence_Search(board: Board, alpha: float, beta: float, maximizing: bool, depth: int = 0) -> float:
-    global QUIESCENCE_NODES
+    global QUIESCENCE_NODES, QUIESCENCE_TIME
     QUIESCENCE_NODES += 1
+    import time
+    t0 = time.perf_counter()
 
     if QUIESCENCE_NODES > 50000:
+        t1 = time.perf_counter()
+        QUIESCENCE_TIME += t1 - t0
         return Evaluate_Position(board)
 
     stand_pat = Evaluate_Position(board)
 
     if maximizing:
         if stand_pat >= beta:
+            t1 = time.perf_counter()
+            QUIESCENCE_TIME += t1 - t0
             return beta
         alpha = max(alpha, stand_pat)
     else:
         if stand_pat <= alpha:
+            t1 = time.perf_counter()
+            QUIESCENCE_TIME += t1 - t0
             return alpha
         beta = min(beta, stand_pat)
 
     if depth >= Q_DEPTH_LIMIT:
+        t1 = time.perf_counter()
+        QUIESCENCE_TIME += t1 - t0
         return stand_pat
     
     capture_moves = []
     for move in board.Generate_Legal_Moves():
         if move.piece_captured:
-            see = Static_Exchange_Evaluation (board, move)
-            if see > 0:
-                capture_moves.append(move)
+            if Fast_Static_Exchange_Evaluation(board, move) < 0:
+                continue
+
+            capture_moves.append(move)
 
     capture_moves.sort(key=lambda m: (m.piece_captured, m.piece_moved))
 
@@ -578,6 +610,9 @@ def Quiescence_Search(board: Board, alpha: float, beta: float, maximizing: bool,
                 beta = score
             if beta <= alpha:
                 break
+            
+    t1 = time.perf_counter()
+    QUIESCENCE_TIME += t1 - t0
     return alpha if maximizing else beta
 
 def Get_Attackers (board: Board, target_row: int, target_col: int, white: bool):
@@ -621,8 +656,13 @@ def Static_Exchange_Evaluation (board: Board, move: Move) -> int:
     }
 
     def see_recursive(square, attackers_w, attackers_b, side, gain_stack):
+        global SEE_TIME
+        import time 
+        t0 = time.perf_counter()
         attackers = attackers_w if side else attackers_b
         if not attackers:
+            t1 = time.perf_counter()
+            SEE_TIME += t1 - t0
             return gain_stack[-1] if gain_stack else 0
 
         attacker = min(attackers, key=lambda x: value_map.get(x[2], 10000))
@@ -634,12 +674,16 @@ def Static_Exchange_Evaluation (board: Board, move: Move) -> int:
 
         # 🔥 Limit SEE recursion depth to prevent infinite recursion
         if len(gain_stack) > 4:
+            t1 = time.perf_counter()
+            SEE_TIME += t1 - t0
             return gain_stack[-1]
 
         temp_board.board[attacker[0]][attacker[1]] = "."
         temp_board.board[square[0]][square[1]] = attacker[2]
 
         new_attackers = Get_Attackers(temp_board, *square, white=side)
+        t1 = time.perf_counter()
+        SEE_TIME += t1 - t0
         return max(-see_recursive(square, attackers_b, new_attackers, not side, gain_stack), gain_stack[-1])
 
     if not move.piece_captured:
@@ -652,17 +696,25 @@ def Static_Exchange_Evaluation (board: Board, move: Move) -> int:
     return see_recursive(target_square, attackers_white, attackers_black, board.white_to_move, [])
 
 def Fast_Static_Exchange_Evaluation (board: Board, move: Move) -> int:
+    global FAST_SEE_TIME
+    import time
+    t0 = time.perf_counter()
+
     piece_values = {
         'P': 100, 'N': 300, 'B': 300, 'R': 500, 'Q': 900, 'K': 10000,
         'p': 100, 'n': 300, 'b': 300, 'r': 500, 'q': 900, 'k': 10000
     }
 
     if not move.piece_captured:
+        t1 = time.perf_counter()
+        FAST_SEE_TIME += t1 - t0
         return 0
     
     victim_value = piece_values.get(move.piece_captured, 0)
     attacker_value = piece_values.get(move.piece_moved, 1)
 
+    t1 = time.perf_counter()
+    FAST_SEE_TIME += t1 - t0
     return victim_value - attacker_value
 
 def Score_Move (board: Board, move: Move, depth: int = 0) -> int:
@@ -692,12 +744,21 @@ def Score_Move (board: Board, move: Move, depth: int = 0) -> int:
     return HISTORY_HEURISTIC.get(key, 0)
 
 def Find_Best_Move(board: Board, max_depth: int) -> Move:
+    import time
+    start_time = time.perf_counter()
+    global NODES_SEARCHED
+    NODES_SEARCHED = 0
+    TRANSPOSITION_TABLE.clear()
+    TRANSPOSITION_HITS = 0
+
     best_move = None
     guess = Evaluate_Position(board)
     maximizing = board.white_to_move
-    alpha, beta = -MATE_SCORE, MATE_SCORE
+    WINDOW_SIZE = 50
 
     for current_depth in range(1, max_depth + 1):
+        alpha = guess - WINDOW_SIZE
+        beta = guess + WINDOW_SIZE
         legal_moves = board.Generate_Legal_Moves()
         legal_moves.sort(key=lambda m: Score_Move(board, m, current_depth), reverse=board.white_to_move)
 
@@ -705,18 +766,18 @@ def Find_Best_Move(board: Board, max_depth: int) -> Move:
         pv_move = None
 
         for move_index, move in enumerate(legal_moves):
-            clone = board.Copy_For_Color(board.white_to_move)
-            if not clone.Make_Move(move):
+            if not board.Make_Move(move):
                 continue
 
             if move_index == 0 or current_depth < 4:
-                score = Minimax(clone, current_depth - 1, alpha, beta, not maximizing)
+                score = Minimax(board, current_depth - 1, alpha, beta, not maximizing)
             else:
                 # PVS: Narrow window
-                score = Minimax(clone, current_depth - 1, alpha + 1, alpha, not maximizing)
-                if alpha < score < beta:
-                    # Re-search if score is in window
-                    score = Minimax(clone, current_depth - 1, alpha, beta, not maximizing)
+                score = Minimax(board, current_depth - 1, alpha, beta, not maximizing)
+                if score <= alpha or score >= beta:
+                    score = Minimax(board, current_depth - 1, -MATE_SCORE, MATE_SCORE, not maximizing)
+
+            board.Undo_Move()
 
             if board.white_to_move and score > best_score:
                 best_score = score
@@ -731,7 +792,10 @@ def Find_Best_Move(board: Board, max_depth: int) -> Move:
             best_move = pv_move
 
         print(f"[Depth {current_depth}] Best: {best_move}, Score: {best_score:.2f}")
-
+        guess = best_score
+    end_time = time.perf_counter()
+    elapsed = end_time - start_time
+    print(f"✅ Move found in {elapsed:.3f}s | Nodes: {NODES_SEARCHED:,} | NPS: {int(NODES_SEARCHED / elapsed):,}")
     return best_move
 
 def Is_Endgame (board: Board) -> bool:
@@ -752,3 +816,12 @@ def Print_Profiling_Stats():
     print (f"Transposition hits: {TRANSPOSITION_HITS}")
     print (f"Null move pruning: {NMP_USED}")
     print (f"Late move reduction: {LMR_COUNT}")
+
+def Print_Evaluation_Times():
+    print ("Evaluation times:")
+    print (f"Minimax: {MINIMAX_TIME:.3f}s")
+    print (f"Quiescence: {QUIESCENCE_TIME:.3f}s")
+    print (f"Static Exchange Evaluation: {SEE_TIME:.3f}s")
+    print (f"Fast SEE: {FAST_SEE_TIME:.3f}s")
+    print (f"Evaluate Position: {EVALUATE_POSITION_TIME:.3f}s")
+    print (f"Find legal moves time: {Board.FIND_LEGAL_MOVES_TIME:.3f}s")
