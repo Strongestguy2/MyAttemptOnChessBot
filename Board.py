@@ -1,7 +1,11 @@
 from typing import Optional, Tuple, List, Set
 from Move import Move
+from Zobrist import hash_board
+
+
 
 class Board:
+    FIND_LEGAL_MOVES_TIME = 0
 
     def __init__(self):
         self.board = [
@@ -35,19 +39,7 @@ class Board:
         print (f"fullmove number: {self.fullmove_number}")
     
     def Hash_Board(self) -> str:
-        rows = ["".join(row) for row in self.board]
-        board_str = "/".join(rows)
-        castling = "".join(sorted(self.castling_rights))
-
-        ep_square = "-"
-        if self.en_passant_square:
-            # only include if it’s a legal capture square
-            r, c = self.en_passant_square
-            if (self.white_to_move and r == 2) or (not self.white_to_move and r == 5):
-                ep_square = chr(c + ord('a'))
-
-        extras = f"{self.white_to_move}_{castling}_{ep_square}"
-        return board_str + "_" + extras
+        return hash_board(self)
     
     def Copy_For_Color(self, white: bool):
         import copy
@@ -271,6 +263,8 @@ class Board:
         return False
     
     def Generate_Legal_Moves(self, include_castling=True) -> list:
+        import time
+        t0 = time.perf_counter()
         all_moves = []
         for row in range(8):
             for col in range(8):
@@ -287,6 +281,8 @@ class Board:
                 legal_moves.append(move)
             self.Undo_Move()
 
+        t1 = time.perf_counter()
+        Board.FIND_LEGAL_MOVES_TIME += t1 - t0
         return legal_moves
     
     def Is_King_In_Check(self) -> bool:
@@ -326,9 +322,6 @@ class Board:
         if move.is_en_passant:
             capture_row = to_row + (1 if self.white_to_move else -1)
             self.board[capture_row][to_col] = '.'
-
-        if self.board[to_row][to_col].lower() == 'k':
-            return False  # Don't overwrite king
 
         if move.is_pawn_promotion:
             if move.promotion_choice.upper() == 'K':
