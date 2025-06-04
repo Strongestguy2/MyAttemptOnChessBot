@@ -28,5 +28,3 @@ class Move:
                 (f" en passant" if self.is_en_passant else "") + \
                 (f" castling" if self.is_castling else "")
     
-example_move = Move(start=(6, 4), end=(4, 4), piece_moved='P')
-print(example_move)

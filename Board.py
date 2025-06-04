@@ -42,9 +42,16 @@ class Board:
         return hash_board(self)
     
     def Copy_For_Color(self, white: bool):
-        import copy
-        clone = copy.deepcopy(self)
+        clone = Board.__new__(Board)
+        clone.board = [row[:] for row in self.board]
         clone.white_to_move = white
+        clone.castling_rights = self.castling_rights.copy()
+        clone.en_passant_square = self.en_passant_square
+        clone.halfmove_clock = self.halfmove_clock
+        clone.fullmove_number = self.fullmove_number
+        clone.move_history = []
+        clone.position_history = self.position_history.copy()
+        clone.track_repetition = self.track_repetition
         return clone
     
     def Get_Pseudo_Legal_Moves (self, include_castling = True) -> list:
@@ -152,8 +159,10 @@ class Board:
                 target = self.board[r][c]
                 if target == '.' or target not in ally_pieces:
                     test_move = Move((row, col), (r, c), self.board[row][col], target if target != '.' else None)
-                    clone = self.Copy_For_Color(self.white_to_move)
-                    if clone.Make_Move(test_move) and not clone.Is_King_In_Check():
+                    self.Make_Move(test_move)
+                    in_check = self.Is_King_In_Check()
+                    self.Undo_Move()
+                    if not in_check:
                         moves.append(test_move)
 
     def _Slide_Moves (self, row: int, col: int, directions: List[Tuple[int, int]], moves: list):
@@ -305,13 +314,32 @@ class Board:
         to_row, to_col = move.end
 
         state = {
-            'board_snapshot': [row.copy() for row in self.board],
-            'white_to_move': self.white_to_move,
+            'move': move,
+            'captured_piece': self.board[to_row][to_col],
             'castling_rights': self.castling_rights.copy(),
             'en_passant_square': self.en_passant_square,
             'halfmove_clock': self.halfmove_clock,
-            'fullmove_number': self.fullmove_number
+            'fullmove_number': self.fullmove_number,
+            'white_to_move': self.white_to_move,
+            'moved_piece': self.board[from_row][from_col],
         }
+
+        if move.is_en_passant:
+            capture_row = to_row + (1 if self.white_to_move else -1)
+            state['ep_capture'] = (capture_row, to_col, self.board[capture_row][to_col])
+            self.board[capture_row][to_col] = '.'
+
+        if move.is_castling:
+            if to_col - from_col == 2:
+                rook_from = (from_row, 7)
+                rook_to = (from_row, 5)
+            else:
+                rook_from = (from_row, 0)
+                rook_to = (from_row, 3)
+            state['rook_move'] = (rook_from, rook_to)
+            self.board[rook_to[0]][rook_to[1]] = self.board[rook_from[0]][rook_from[1]]
+            self.board[rook_from[0]][rook_from[1]] = '.'
+
         self.move_history.append(state)
         self.en_passant_square = None
 
@@ -319,26 +347,33 @@ class Board:
             mid_row = (from_row + to_row) // 2
             self.en_passant_square = (mid_row, from_col)
 
-        if move.is_en_passant:
-            capture_row = to_row + (1 if self.white_to_move else -1)
-            self.board[capture_row][to_col] = '.'
-
+        moved_piece = self.board[from_row][from_col]
         if move.is_pawn_promotion:
-            if move.promotion_choice.upper() == 'K':
-                return False
             self.board[to_row][to_col] = move.promotion_choice
         else:
-            self.board[to_row][to_col] = move.piece_moved
+            self.board[to_row][to_col] = moved_piece
 
         self.board[from_row][from_col] = '.'
 
-        if self.track_repetition:
-            key = self.Hash_Board()
-            self.position_history[key] = self.position_history.get(key, 0) + 1
+        # Update castling rights when rooks or king move
+        if moved_piece == 'K':
+            self.castling_rights.discard('K')
+            self.castling_rights.discard('Q')
+        elif moved_piece == 'k':
+            self.castling_rights.discard('k')
+            self.castling_rights.discard('q')
+        elif moved_piece == 'R' and move.start == (7, 0):
+            self.castling_rights.discard('Q')
+        elif moved_piece == 'R' and move.start == (7, 7):
+            self.castling_rights.discard('K')
+        elif moved_piece == 'r' and move.start == (0, 0):
+            self.castling_rights.discard('q')
+        elif moved_piece == 'r' and move.start == (0, 7):
+            self.castling_rights.discard('k')
 
         self.white_to_move = not self.white_to_move
 
-        if move.piece_captured or move.piece_moved.upper() == "P":
+        if move.piece_captured or moved_piece.upper() == "P":
             self.halfmove_clock = 0
         else:
             self.halfmove_clock += 1
@@ -346,50 +381,52 @@ class Board:
         if not self.white_to_move:
             self.fullmove_number += 1
 
-        if move.is_castling:
-            squares = []
-            if move.end == (7, 6): squares = [(7, 5), (7, 6)]
-            elif move.end == (7, 2): squares = [(7, 3), (7, 2)]
-            elif move.end == (0, 6): squares = [(0, 5), (0, 6)]
-            elif move.end == (0, 2): squares = [(0, 3), (0, 2)]
-
-            for sq in squares:
-                if self._Is_Square_Attacked(sq):
-                    self.Undo_Move()
-                    return False
-
-        if move.piece_moved == 'R' and move.start == (7, 0) and 'Q' in self.castling_rights:
-            self.castling_rights.discard('Q')
-        elif move.piece_moved == 'R' and move.start == (7, 7) and 'K' in self.castling_rights:
-            self.castling_rights.discard('K')
-        elif move.piece_moved == 'r' and move.start == (0, 0) and 'q' in self.castling_rights:
-            self.castling_rights.discard('q')
-        elif move.piece_moved == 'r' and move.start == (0, 7) and 'k' in self.castling_rights:
-            self.castling_rights.discard('k')
-
-        if self.Is_King_In_Check():
-            self.Undo_Move()
-            return False
+        if self.track_repetition:
+            state['hash'] = self.Hash_Board()
+            self.position_history[state['hash']] = self.position_history.get(state['hash'], 0) + 1
 
         return True
 
     def Undo_Move (self):
         if not self.move_history:
             return
-        
+
         last_state = self.move_history.pop()
-        self.board = [row.copy() for row in last_state['board_snapshot']]
-        self.white_to_move = last_state['white_to_move']
+        move = last_state['move']
+        from_row, from_col = move.start
+        to_row, to_col = move.end
+
+        # Restore moved piece
+        if move.is_pawn_promotion:
+            self.board[from_row][from_col] = last_state['moved_piece']
+            self.board[to_row][to_col] = last_state['captured_piece']
+        else:
+            self.board[from_row][from_col] = last_state['moved_piece']
+            self.board[to_row][to_col] = last_state['captured_piece']
+
+        # Undo en passant capture
+        if move.is_en_passant and 'ep_capture' in last_state:
+            r, c, piece = last_state['ep_capture']
+            self.board[r][c] = piece
+
+        # Undo castling rook move
+        if move.is_castling and 'rook_move' in last_state:
+            rook_from, rook_to = last_state['rook_move']
+            self.board[rook_from[0]][rook_from[1]] = self.board[rook_to[0]][rook_to[1]]
+            self.board[rook_to[0]][rook_to[1]] = '.'
+
         self.castling_rights = last_state['castling_rights']
         self.en_passant_square = last_state['en_passant_square']
         self.halfmove_clock = last_state['halfmove_clock']
         self.fullmove_number = last_state['fullmove_number']
+        self.white_to_move = last_state['white_to_move']
 
-        key = self.Hash_Board()
-        if key in self.position_history:
-            self.position_history[key] -= 1
-            if self.position_history[key] == 0:
-                del self.position_history[key]
+        if self.track_repetition and 'hash' in last_state:
+            key = last_state['hash']
+            if key in self.position_history:
+                self.position_history[key] -= 1
+                if self.position_history[key] == 0:
+                    del self.position_history[key]
 
     def Is_Threefold_Repetition (self) -> bool:
         key = self.Hash_Board()
@@ -398,5 +435,3 @@ class Board:
     def Is_Fifty_Move_Rule (self) -> bool:
         return self.halfmove_clock >= 100
 
-board = Board()
-board.Print_Board()
