@@ -15,7 +15,6 @@ MATE_SCORE = 10000
 MINIMAX_TIME = 0
 QUIESCENCE_TIME = 0
 SEE_TIME = 0
-FAST_SEE_TIME = 0
 EVALUATE_POSITION_TIME = 0
 
 def Evaluate_Position(board: Board) -> float:
@@ -584,7 +583,7 @@ def Quiescence_Search(board: Board, alpha: float, beta: float, maximizing: bool,
     capture_moves = []
     for move in board.Generate_Legal_Moves():
         if move.piece_captured:
-            if Fast_Static_Exchange_Evaluation(board, move) < 0:
+            if Static_Exchange_Evaluation(board, move) < 0:
                 continue
 
             capture_moves.append(move)
@@ -695,27 +694,6 @@ def Static_Exchange_Evaluation (board: Board, move: Move) -> int:
 
     return see_recursive(target_square, attackers_white, attackers_black, board.white_to_move, [])
 
-def Fast_Static_Exchange_Evaluation (board: Board, move: Move) -> int:
-    global FAST_SEE_TIME
-    import time
-    t0 = time.perf_counter()
-
-    piece_values = {
-        'P': 100, 'N': 300, 'B': 300, 'R': 500, 'Q': 900, 'K': 10000,
-        'p': 100, 'n': 300, 'b': 300, 'r': 500, 'q': 900, 'k': 10000
-    }
-
-    if not move.piece_captured:
-        t1 = time.perf_counter()
-        FAST_SEE_TIME += t1 - t0
-        return 0
-    
-    victim_value = piece_values.get(move.piece_captured, 0)
-    attacker_value = piece_values.get(move.piece_moved, 1)
-
-    t1 = time.perf_counter()
-    FAST_SEE_TIME += t1 - t0
-    return victim_value - attacker_value
 
 def Score_Move (board: Board, move: Move, depth: int = 0) -> int:
     "mvv-lva most valuable victim - least valuable attacker"
@@ -733,7 +711,7 @@ def Score_Move (board: Board, move: Move, depth: int = 0) -> int:
     if victim:
         victim_value = piece_values.get(victim, 0)
         attacker_value = piece_values.get(attacker, 1)
-        see_bonus = Fast_Static_Exchange_Evaluation (board, move)
+        see_bonus = Static_Exchange_Evaluation(board, move)
         tactical_bonus = 50 if see_bonus >= victim_value else -50
         return (victim_value - attacker_value) + see_bonus + tactical_bonus + 5000
     
@@ -822,6 +800,5 @@ def Print_Evaluation_Times():
     print (f"Minimax: {MINIMAX_TIME:.3f}s")
     print (f"Quiescence: {QUIESCENCE_TIME:.3f}s")
     print (f"Static Exchange Evaluation: {SEE_TIME:.3f}s")
-    print (f"Fast SEE: {FAST_SEE_TIME:.3f}s")
     print (f"Evaluate Position: {EVALUATE_POSITION_TIME:.3f}s")
     print (f"Find legal moves time: {Board.FIND_LEGAL_MOVES_TIME:.3f}s")
