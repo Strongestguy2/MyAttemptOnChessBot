@@ -765,61 +765,38 @@ def Find_Best_Move(board: Board, max_depth: int) -> Move:
     WINDOW_SIZE = 50
 
     for current_depth in range(1, max_depth + 1):
-        window = WINDOW_SIZE
-        alpha = guess - window
-        beta = guess + window
+        alpha = guess - WINDOW_SIZE
+        beta = guess + WINDOW_SIZE
+        legal_moves = board.Generate_Legal_Moves()
+        legal_moves.sort(key=lambda m: Score_Move(board, m, current_depth), reverse=board.white_to_move)
 
-        while True:
-            legal_moves = board.Generate_Legal_Moves()
-            legal_moves.sort(key=lambda m: Score_Move(board, m, current_depth), reverse=board.white_to_move)
+        best_score = float('-inf') if board.white_to_move else float('inf')
+        pv_move = None
 
-            if best_move and best_move in legal_moves:
-                legal_moves.remove(best_move)
-                legal_moves.insert(0, best_move)
-
-            best_score = float('-inf') if board.white_to_move else float('inf')
-            pv_move = None
-
-            for move_index, move in enumerate(legal_moves):
-                if not board.Make_Move(move):
-                    continue
-
-                if move_index == 0 or current_depth < 4:
-                    score = Minimax(board, current_depth - 1, alpha, beta, not maximizing)
-                else:
-                    score = Minimax(board, current_depth - 1, alpha, beta, not maximizing)
-                    if score <= alpha or score >= beta:
-                        score = Minimax(board, current_depth - 1, -MATE_SCORE, MATE_SCORE, not maximizing)
-
-                board.Undo_Move()
-
-                if board.white_to_move and score > best_score:
-                    best_score = score
-                    pv_move = move
-                    alpha = max(alpha, best_score)
-                elif not board.white_to_move and score < best_score:
-                    best_score = score
-                    pv_move = move
-                    beta = min(beta, best_score)
-
-                if alpha >= beta:
-                    break
-
-            if pv_move:
-                best_move = pv_move
-
-            if best_score <= alpha:
-                window *= 2
-                alpha = best_score - window
-                beta = best_score + window
+        for move_index, move in enumerate(legal_moves):
+            if not board.Make_Move(move):
                 continue
-            elif best_score >= beta:
-                window *= 2
-                alpha = best_score - window
-                beta = best_score + window
-                continue
+
+            if move_index == 0 or current_depth < 4:
+                score = Minimax(board, current_depth - 1, alpha, beta, not maximizing)
             else:
-                break
+                score = Minimax(board, current_depth - 1, alpha, beta, not maximizing)
+                if score <= alpha or score >= beta:
+                    score = Minimax(board, current_depth - 1, -MATE_SCORE, MATE_SCORE, not maximizing)
+
+            board.Undo_Move()
+
+            if board.white_to_move and score > best_score:
+                best_score = score
+                pv_move = move
+                alpha = max(alpha, best_score)
+            elif not board.white_to_move and score < best_score:
+                best_score = score
+                pv_move = move
+                beta = min(beta, best_score)
+
+        if pv_move:
+            best_move = pv_move
 
         print(f"[Depth {current_depth}] Best: {best_move}, Score: {best_score:.2f}")
         guess = best_score
