@@ -27,4 +27,32 @@ class Move:
                 (f" promotion " if self.is_pawn_promotion else "") + \
                 (f" en passant" if self.is_en_passant else "") + \
                 (f" castling" if self.is_castling else "")
+
+    def __eq__(self, other):
+        if not isinstance(other, Move):
+            return False
+        return (
+            self.start == other.start and
+            self.end == other.end and
+            self.piece_moved == other.piece_moved and
+            self.piece_captured == other.piece_captured and
+            self.is_pawn_promotion == other.is_pawn_promotion and
+            self.promotion_choice == other.promotion_choice and
+            self.is_en_passant == other.is_en_passant and
+            self.is_castling == other.is_castling
+        )
+
+    def __hash__(self):
+        return hash(
+            (
+                self.start,
+                self.end,
+                self.piece_moved,
+                self.piece_captured,
+                self.is_pawn_promotion,
+                self.promotion_choice,
+                self.is_en_passant,
+                self.is_castling,
+            )
+        )
     

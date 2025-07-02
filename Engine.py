@@ -1,6 +1,15 @@
 from Board import Board, Move
 from tables import PAWN_TABLE, KNIGHT_TABLE, BISHOP_TABLE, ROOK_TABLE, QUEEN_TABLE, KING_MID_TABLE, KING_END_TABLE
 import math
+from dataclasses import dataclass
+
+
+@dataclass
+class TTEntry:
+    depth: int
+    score: float
+    flag: str
+    move: Move
 
 TRANSPOSITION_TABLE = {}
 TRANSPOSITION_HITS = 0
@@ -425,6 +434,9 @@ def Minimax(board: Board, depth: int, alpha: float, beta: float, maximizing: boo
     import time
     t0 = time.perf_counter()
 
+    alpha_orig = alpha
+    beta_orig = beta
+
     if depth == 0:
         score = Quiescence_Search(board, alpha, beta, maximizing, depth=0)
         t1 = time.perf_counter()
@@ -437,14 +449,25 @@ def Minimax(board: Board, depth: int, alpha: float, beta: float, maximizing: boo
 
     key = board.Hash_Board()
     if key in TRANSPOSITION_TABLE:
-        TRANSPOSITION_HITS += 1
-        tt_score, tt_move = TRANSPOSITION_TABLE[key]
-        if tt_move in legal_moves:
-            legal_moves.remove(tt_move)
-            legal_moves.insert(0, tt_move)
-        t1 = time.perf_counter()
-        MINIMAX_TIME += t1 - t0
-        return tt_score
+        entry = TRANSPOSITION_TABLE[key]
+        if entry.depth >= depth:
+            TRANSPOSITION_HITS += 1
+            if entry.move in legal_moves:
+                legal_moves.remove(entry.move)
+                legal_moves.insert(0, entry.move)
+
+            if entry.flag == 'EXACT':
+                t1 = time.perf_counter()
+                MINIMAX_TIME += t1 - t0
+                return entry.score
+            elif entry.flag == 'LOWER':
+                alpha = max(alpha, entry.score)
+            elif entry.flag == 'UPPER':
+                beta = min(beta, entry.score)
+            if alpha >= beta:
+                t1 = time.perf_counter()
+                MINIMAX_TIME += t1 - t0
+                return entry.score
     
     # Null Move Pruning
     if not board.Is_King_In_Check() and depth >= 3 and not Is_Endgame(board):
@@ -460,7 +483,7 @@ def Minimax(board: Board, depth: int, alpha: float, beta: float, maximizing: boo
 
     if not legal_moves:
         score = -10000 if board.Is_King_In_Check() else 0
-        TRANSPOSITION_TABLE[key] = (score, None)
+        TRANSPOSITION_TABLE[key] = TTEntry(depth, score, 'EXACT', None)
         t1 = time.perf_counter()
         MINIMAX_TIME += t1 - t0
         return score
@@ -544,7 +567,14 @@ def Minimax(board: Board, depth: int, alpha: float, beta: float, maximizing: boo
         MINIMAX_TIME += t1 - t0
         return 10000
 
-    TRANSPOSITION_TABLE[key] = (best_score, best_move)
+    if best_move is not None:
+        if best_score <= alpha_orig:
+            flag = 'UPPER'
+        elif best_score >= beta_orig:
+            flag = 'LOWER'
+        else:
+            flag = 'EXACT'
+        TRANSPOSITION_TABLE[key] = TTEntry(depth, best_score, flag, best_move)
     t1 = time.perf_counter()
     MINIMAX_TIME += t1 - t0
     return best_score
@@ -735,39 +765,61 @@ def Find_Best_Move(board: Board, max_depth: int) -> Move:
     WINDOW_SIZE = 50
 
     for current_depth in range(1, max_depth + 1):
-        alpha = guess - WINDOW_SIZE
-        beta = guess + WINDOW_SIZE
-        legal_moves = board.Generate_Legal_Moves()
-        legal_moves.sort(key=lambda m: Score_Move(board, m, current_depth), reverse=board.white_to_move)
+        window = WINDOW_SIZE
+        alpha = guess - window
+        beta = guess + window
 
-        best_score = float('-inf') if board.white_to_move else float('inf')
-        pv_move = None
+        while True:
+            legal_moves = board.Generate_Legal_Moves()
+            legal_moves.sort(key=lambda m: Score_Move(board, m, current_depth), reverse=board.white_to_move)
 
-        for move_index, move in enumerate(legal_moves):
-            if not board.Make_Move(move):
+            if best_move and best_move in legal_moves:
+                legal_moves.remove(best_move)
+                legal_moves.insert(0, best_move)
+
+            best_score = float('-inf') if board.white_to_move else float('inf')
+            pv_move = None
+
+            for move_index, move in enumerate(legal_moves):
+                if not board.Make_Move(move):
+                    continue
+
+                if move_index == 0 or current_depth < 4:
+                    score = Minimax(board, current_depth - 1, alpha, beta, not maximizing)
+                else:
+                    score = Minimax(board, current_depth - 1, alpha, beta, not maximizing)
+                    if score <= alpha or score >= beta:
+                        score = Minimax(board, current_depth - 1, -MATE_SCORE, MATE_SCORE, not maximizing)
+
+                board.Undo_Move()
+
+                if board.white_to_move and score > best_score:
+                    best_score = score
+                    pv_move = move
+                    alpha = max(alpha, best_score)
+                elif not board.white_to_move and score < best_score:
+                    best_score = score
+                    pv_move = move
+                    beta = min(beta, best_score)
+
+                if alpha >= beta:
+                    break
+
+            if pv_move:
+                best_move = pv_move
+
+            if best_score <= alpha:
+                window *= 2
+                alpha = best_score - window
+                beta = best_score + window
                 continue
-
-            if move_index == 0 or current_depth < 4:
-                score = Minimax(board, current_depth - 1, alpha, beta, not maximizing)
+            elif best_score >= beta:
+                window *= 2
+                alpha = best_score - window
+                beta = best_score + window
+                continue
             else:
-                # PVS: Narrow window
-                score = Minimax(board, current_depth - 1, alpha, beta, not maximizing)
-                if score <= alpha or score >= beta:
-                    score = Minimax(board, current_depth - 1, -MATE_SCORE, MATE_SCORE, not maximizing)
-
-            board.Undo_Move()
-
-            if board.white_to_move and score > best_score:
-                best_score = score
-                pv_move = move
-                alpha = max(alpha, best_score)
-            elif not board.white_to_move and score < best_score:
-                best_score = score
-                pv_move = move
-                beta = min(beta, best_score)
-
-        if pv_move:
-            best_move = pv_move
+                break
 
         print(f"[Depth {current_depth}] Best: {best_move}, Score: {best_score:.2f}")
         guess = best_score

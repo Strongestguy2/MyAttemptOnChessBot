@@ -25,7 +25,7 @@ if __name__ == "__main__":
     board.Print_Board()
 
     print("\nBot is thinking...")
-    best_move = Engine.Find_Best_Move(board, depth=4)
+    best_move = Engine.Find_Best_Move(board, max_depth=4)
     print(f"\nBot chose: {best_move}")
     board.Make_Move(best_move)
     board.Print_Board()
