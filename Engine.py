@@ -3,6 +3,7 @@ from Move import Move
 from tables import PAWN_TABLE, KNIGHT_TABLE, BISHOP_TABLE, ROOK_TABLE, QUEEN_TABLE, KING_MID_TABLE, KING_END_TABLE
 import math
 import time
+import datetime
 from dataclasses import dataclass
 from typing import Callable
 
@@ -34,10 +35,16 @@ class EngineSearchContext:
         self.last_search_depth = 0
         self.last_root_score = 0.0
         self.last_pv = []
+        self.last_best_move_uci = "0000"
         self.total_time_taken = 0.0
         self.tt_generation = 0
         self.search_deadline = None
         self.stop_checker: Callable[[], bool] | None = None
+        self.root_pv_move = None
+        self.max_seldepth = 0
+        self.aspiration_fail_lows = 0
+        self.aspiration_fail_highs = 0
+        self.aspiration_window_expansions = 0
 
 ctx = EngineSearchContext()
 
@@ -59,6 +66,7 @@ def __getattr__(name):
         'LAST_SEARCH_DEPTH': 'last_search_depth',
         'LAST_ROOT_SCORE': 'last_root_score',
         'LAST_PV': 'last_pv',
+        'LAST_BEST_MOVE_UCI': 'last_best_move_uci',
         'TOTAL_TIME_TAKEN': 'total_time_taken'
     }
     if name in _mapping:
@@ -96,9 +104,15 @@ def Reset_Search_Stats():
     ctx.last_search_depth = 0
     ctx.last_root_score = 0.0
     ctx.last_pv = []
+    ctx.last_best_move_uci = "0000"
     ctx.total_time_taken = 0.0
     ctx.search_deadline = None
     ctx.stop_checker = None
+    ctx.root_pv_move = None
+    ctx.max_seldepth = 0
+    ctx.aspiration_fail_lows = 0
+    ctx.aspiration_fail_highs = 0
+    ctx.aspiration_window_expansions = 0
     Board.FIND_LEGAL_MOVES_TIME = 0
 
 
@@ -184,6 +198,139 @@ def _Extract_PV(board: Board, depth: int) -> list[str]:
 
     return pv
 
+
+def _Prioritize_Root_Move(moves: list[Move], preferred_move: Move | None):
+    if preferred_move is None:
+        return
+    for i, move in enumerate(moves):
+        if move == preferred_move or move.To_UCI() == preferred_move.To_UCI():
+            if i != 0:
+                moves.insert(0, moves.pop(i))
+            return
+
+
+def _Square_To_Alg(square: tuple[int, int] | None) -> str:
+    if square is None:
+        return "-"
+    row, col = square
+    return f"{chr(ord('a') + col)}{8 - row}"
+
+
+def _Board_To_FEN(board: Board) -> str:
+    fen_rows = []
+    for row in board.board:
+        empty = 0
+        out = []
+        for piece in row:
+            if piece == ".":
+                empty += 1
+            else:
+                if empty:
+                    out.append(str(empty))
+                    empty = 0
+                out.append(piece)
+        if empty:
+            out.append(str(empty))
+        fen_rows.append("".join(out))
+
+    active = "w" if board.white_to_move else "b"
+    castling = "".join([flag for flag in "KQkq" if flag in board.castling_rights]) or "-"
+    ep = _Square_To_Alg(board.en_passant_square)
+    halfmove = getattr(board, "halfmove_clock", 0)
+    fullmove = getattr(board, "fullmove_number", 1)
+    return f"{'/'.join(fen_rows)} {active} {castling} {ep} {halfmove} {fullmove}"
+
+
+def _Append_Log_Line(line: str):
+    if not LOGGING_ENABLED:
+        return
+    with open(LOG_FILE, "a", encoding="utf-8") as log_file:
+        log_file.write(line + "\n")
+
+
+def Format_UCI_Score(score: float) -> str:
+    cp_score = int(round(score))
+    mate_margin = MATE_SCORE - abs(cp_score)
+    if mate_margin <= 200:
+        plies_to_mate = max(1, (mate_margin + 1) // 2)
+        if cp_score < 0:
+            plies_to_mate = -plies_to_mate
+        return f"mate {plies_to_mate}"
+    return f"cp {cp_score}"
+
+
+def Get_Hashfull_Permill() -> int:
+    if MAX_TT_SIZE <= 0:
+        return 0
+    return min(1000, int((len(ctx.transposition_table) * 1000) / MAX_TT_SIZE))
+
+
+def Get_Search_Stats() -> dict:
+    elapsed = max(1e-9, ctx.total_time_taken)
+    total_nodes = ctx.nodes_searched + ctx.quiescence_nodes
+    return {
+        "depth": ctx.last_search_depth,
+        "seldepth": max(ctx.max_seldepth, ctx.last_search_depth),
+        "score_cp": int(round(ctx.last_root_score)),
+        "bestmove": ctx.last_best_move_uci,
+        "pv": list(ctx.last_pv),
+        "nodes": ctx.nodes_searched,
+        "qnodes": ctx.quiescence_nodes,
+        "total_nodes": total_nodes,
+        "time_s": ctx.total_time_taken,
+        "time_ms": int(ctx.total_time_taken * 1000),
+        "nps": int(total_nodes / elapsed),
+        "tt_hits": ctx.transposition_hits,
+        "tt_cutoffs": ctx.transposition_cutoffs,
+        "hashfull_permille": Get_Hashfull_Permill(),
+        "asp_fail_low": ctx.aspiration_fail_lows,
+        "asp_fail_high": ctx.aspiration_fail_highs,
+        "asp_expands": ctx.aspiration_window_expansions,
+    }
+
+
+def Estimate_Auto_Depth(board: Board, min_depth: int = 3, max_depth: int = 8) -> int:
+    min_depth = max(1, int(min_depth))
+    max_depth = max(min_depth, int(max_depth))
+
+    legal_moves = board.Generate_Legal_Moves()
+    if not legal_moves:
+        return min_depth
+
+    move_count = len(legal_moves)
+    in_check = board.Is_King_In_Check(board.white_to_move)
+    captures = board._Generate_Pseudo_Legal_Capture_Moves()
+
+    non_pawn_pieces = 0
+    total_pieces = 0
+    for row in board.board:
+        for piece in row:
+            if piece == ".":
+                continue
+            total_pieces += 1
+            if piece.upper() in ("N", "B", "R", "Q"):
+                non_pawn_pieces += 1
+
+    if move_count >= 36:
+        depth = min_depth
+    elif move_count >= 24:
+        depth = min_depth + 1
+    elif move_count >= 14:
+        depth = min_depth + 2
+    else:
+        depth = min_depth + 3
+
+    if in_check:
+        depth += 1
+    if len(captures) >= 8:
+        depth += 1
+    if non_pawn_pieces <= 6:
+        depth += 1
+    if total_pieces <= 10:
+        depth += 1
+
+    return max(min_depth, min(max_depth, depth))
+
 def Order_Moves(board: Board, moves: list, depth: int):
     tt_move = None
     key = board.Hash_Board()
@@ -241,6 +388,8 @@ def Evaluate_Position(board: Board) -> float:
     mg_score = TEMPO_BONUS if board.white_to_move else -TEMPO_BONUS
     eg_score = mg_score
     phase = 0
+    white_bishop_count = 0
+    black_bishop_count = 0
 
     for row in range(8):
         for col in range(8):
@@ -268,6 +417,10 @@ def Evaluate_Position(board: Board) -> float:
                 pst = BISHOP_TABLE[table_row][col] * 10
                 mg_score += pst if piece.isupper() else -pst
                 eg_score += pst if piece.isupper() else -pst
+                if piece.isupper():
+                    white_bishop_count += 1
+                else:
+                    black_bishop_count += 1
             elif piece.upper() == "R":
                 pst = ROOK_TABLE[table_row][col] * 10
                 mg_score += pst if piece.isupper() else -pst
@@ -316,10 +469,10 @@ def Evaluate_Position(board: Board) -> float:
     
 
     # Bishop pair bonus
-    if sum(p == "B" for row in board.board for p in row) >= 2:
+    if white_bishop_count >= 2:
         mg_score += 30
         eg_score += 30
-    if sum(p == "b" for row in board.board for p in row) >= 2:
+    if black_bishop_count >= 2:
         mg_score -= 30
         eg_score -= 30
 
@@ -752,6 +905,8 @@ def Negamax(board: Board, depth: int, alpha: float, beta: float, ply: int = 0) -
         return Evaluate_Node(board)
 
     ctx.nodes_searched += 1
+    if ply > ctx.max_seldepth:
+        ctx.max_seldepth = ply
     t0 = time.perf_counter()
 
     if board.Is_Threefold_Repetition() or board.Is_Fifty_Move_Rule():
@@ -892,6 +1047,8 @@ def Quiescence_Search(board: Board, alpha: float, beta: float, ply: int) -> floa
         return Evaluate_Node(board)
 
     ctx.quiescence_nodes += 1
+    if ply > ctx.max_seldepth:
+        ctx.max_seldepth = ply
     t0 = time.perf_counter()
 
     if ctx.quiescence_nodes > 50000:
@@ -1115,6 +1272,7 @@ def Find_Best_Move(
                 return None
 
             Order_Moves(board, legal_moves, current_depth)
+            _Prioritize_Root_Move(legal_moves, ctx.root_pv_move)
 
             best_score = float('-inf')
             best_move = None
@@ -1149,9 +1307,13 @@ def Find_Best_Move(
             iteration_best_score = best_score
 
             if best_score <= guess - window:
+                ctx.aspiration_fail_lows += 1
+                ctx.aspiration_window_expansions += 1
                 alpha = float('-inf')
                 window *= 2
             elif best_score >= guess + window:
+                ctx.aspiration_fail_highs += 1
+                ctx.aspiration_window_expansions += 1
                 beta = float('inf')
                 window *= 2
             else:
@@ -1166,9 +1328,15 @@ def Find_Best_Move(
         completed_score = iteration_best_score
         completed_depth = current_depth
         completed_pv = _Extract_PV(board, current_depth)
+        if completed_best_move is not None:
+            root_uci = completed_best_move.To_UCI()
+            if not completed_pv or completed_pv[0] != root_uci:
+                completed_pv = [root_uci] + completed_pv
+        ctx.root_pv_move = completed_best_move
         ctx.last_search_depth = completed_depth
         ctx.last_root_score = completed_score
         ctx.last_pv = completed_pv
+        ctx.last_best_move_uci = completed_best_move.To_UCI() if completed_best_move else "0000"
 
         if info_callback:
             elapsed = time.perf_counter() - start_time
@@ -1178,9 +1346,11 @@ def Find_Best_Move(
     ctx.last_search_depth = completed_depth
     ctx.last_root_score = completed_score
     ctx.last_pv = completed_pv
+    ctx.last_best_move_uci = completed_best_move.To_UCI() if completed_best_move else "0000"
     ctx.search_deadline = None
     ctx.stop_checker = None
-    # _Print_Search_Stats()
+
+    _Print_Search_Stats(board, completed_best_move)
     return completed_best_move
 
 def Toggle_Logging(enabled: bool):
@@ -1192,20 +1362,60 @@ def Toggle_Detailed_Log(enabled: bool):
     global DETAILED_LOG_ENABLED
     DETAILED_LOG_ENABLED = bool(enabled)
 
-def _Print_Search_Stats():
+def Clear_Transposition_Table():
+    ctx.transposition_table.clear()
+
+
+def _Print_Search_Stats(board: Board, best_move: Move | None):
     if not LOGGING_ENABLED:
         return
 
-    print(
-        "nodes={nodes} qnodes={qnodes} tt_hits={hits} tt_cutoffs={cuts} "
-        "depth={depth} score={score:+.0f} time={time_s:.3f}s pv={pv}".format(
-            nodes=ctx.nodes_searched,
-            qnodes=ctx.quiescence_nodes,
-            hits=ctx.transposition_hits,
-            cuts=ctx.transposition_cutoffs,
-            depth=ctx.last_search_depth,
-            score=ctx.last_root_score,
-            time_s=ctx.total_time_taken,
-            pv=" ".join(ctx.last_pv),
+    stats = Get_Search_Stats()
+    best_move_uci = best_move.To_UCI() if best_move else "0000"
+    score_text = Format_UCI_Score(ctx.last_root_score)
+    pv_text = " ".join(ctx.last_pv)
+    fen = _Board_To_FEN(board)
+
+    if VERBOSE_SEARCH:
+        print(
+            "nodes={nodes} qnodes={qnodes} tt_hits={hits} tt_cutoffs={cuts} "
+            "depth={depth} seldepth={seldepth} score={score} time={time_s:.3f}s "
+            "nps={nps} asp={fl}/{fh}/{exp} pv={pv}".format(
+                nodes=ctx.nodes_searched,
+                qnodes=ctx.quiescence_nodes,
+                hits=ctx.transposition_hits,
+                cuts=ctx.transposition_cutoffs,
+                depth=ctx.last_search_depth,
+                seldepth=ctx.max_seldepth,
+                score=score_text,
+                time_s=ctx.total_time_taken,
+                nps=stats["nps"],
+                fl=ctx.aspiration_fail_lows,
+                fh=ctx.aspiration_fail_highs,
+                exp=ctx.aspiration_window_expansions,
+                pv=pv_text,
+            )
         )
+
+    timestamp = datetime.datetime.now().isoformat(timespec="seconds")
+    line = (
+        f"[{timestamp}] fen={fen} best={best_move_uci} depth={ctx.last_search_depth} "
+        f"seldepth={ctx.max_seldepth} score={score_text} pv=\"{pv_text}\" "
+        f"nodes={ctx.nodes_searched} qnodes={ctx.quiescence_nodes} total_nodes={stats['total_nodes']} "
+        f"nps={stats['nps']} time_ms={stats['time_ms']} tt_hits={ctx.transposition_hits} "
+        f"tt_cutoffs={ctx.transposition_cutoffs} hashfull={Get_Hashfull_Permill()} "
+        f"asp_fail_low={ctx.aspiration_fail_lows} asp_fail_high={ctx.aspiration_fail_highs} "
+        f"asp_expands={ctx.aspiration_window_expansions}"
     )
+    _Append_Log_Line(line)
+
+    if DETAILED_LOG_ENABLED:
+        _Append_Log_Line(
+            "  timings_ms: minimax={:.2f} quiescence={:.2f} eval={:.2f} see={:.2f} find_legal={:.2f}".format(
+                ctx.minimax_time * 1000.0,
+                ctx.quiescence_time * 1000.0,
+                ctx.evaluate_position_time * 1000.0,
+                ctx.see_time * 1000.0,
+                Board.FIND_LEGAL_MOVES_TIME * 1000.0,
+            )
+        )

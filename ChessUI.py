@@ -23,7 +23,11 @@ class ChessUI:
         self.black_ai = tk.BooleanVar(value=True)
         self.logging_enabled = tk.BooleanVar(value=True)
         self.search_depth = tk.IntVar(value=DEFAULT_TEST_DEPTH)
+        self.search_mode = tk.StringVar(value="depth")
+        self.move_time_value = tk.DoubleVar(value=1.0)
+        self.move_time_unit = tk.StringVar(value="sec")
         self.quick_debug_mode = tk.BooleanVar(value=False)
+        self.last_auto_depth = None
 
         self.selected_square = None
         self.valid_moves = []
@@ -45,6 +49,7 @@ class ChessUI:
 
         tk.Button(control_frame, text="Undo", command=self.Undo).pack(side=tk.LEFT, padx=10)
         tk.Button(control_frame, text="Restart", command=self.Restart).pack(side=tk.LEFT, padx=10)
+        tk.Button(control_frame, text="Clear TT", command=self.Clear_TT).pack(side=tk.LEFT, padx=10)
 
         tk.Checkbutton(control_frame, text="AI controls White", variable=self.white_ai).pack(side=tk.LEFT, padx=10)
         tk.Checkbutton(control_frame, text="AI controls Black", variable=self.black_ai).pack(side=tk.LEFT, padx=10)
@@ -58,10 +63,17 @@ class ChessUI:
         tk.Spinbox(
             control_frame,
             from_=2,
-            to=6,
+            to=64,
             width=3,
             textvariable=self.search_depth,
         ).pack(side=tk.LEFT)
+
+        tk.Label(control_frame, text="Mode").pack(side=tk.LEFT, padx=(10, 2))
+        tk.OptionMenu(control_frame, self.search_mode, "depth", "time", "auto").pack(side=tk.LEFT)
+
+        tk.Label(control_frame, text="Move time").pack(side=tk.LEFT, padx=(10, 2))
+        tk.Entry(control_frame, width=6, textvariable=self.move_time_value).pack(side=tk.LEFT)
+        tk.OptionMenu(control_frame, self.move_time_unit, "ms", "sec").pack(side=tk.LEFT)
 
         tk.Checkbutton(control_frame, text="Enable Logging", variable=self.logging_enabled, 
                        command=self.Toggle_Logging).pack(side=tk.LEFT, padx=10)
@@ -86,7 +98,18 @@ class ChessUI:
 
     def Play_AI_Move(self):
         depth = QUICK_DEBUG_DEPTH if self.quick_debug_mode.get() else max(DEFAULT_TEST_DEPTH, self.search_depth.get())
-        move = Engine.Find_Best_Move(self.board, depth)
+        move_time = self.Get_Move_Time_Seconds()
+        mode = self.search_mode.get()
+        self.last_auto_depth = None
+
+        if mode == "time" and not self.quick_debug_mode.get():
+            move = Engine.Find_Best_Move(self.board, max_depth=64, time_limit=move_time)
+        elif mode == "auto" and not self.quick_debug_mode.get():
+            auto_depth = Engine.Estimate_Auto_Depth(self.board, min_depth=3, max_depth=8)
+            self.last_auto_depth = auto_depth
+            move = Engine.Find_Best_Move(self.board, max_depth=auto_depth)
+        else:
+            move = Engine.Find_Best_Move(self.board, max_depth=depth)
         if move is None:
             self.Check_Endgame()
             return
@@ -99,11 +122,23 @@ class ChessUI:
         side_to_move = "White" if self.board.white_to_move else "Black"
         last_move = self.Format_Move(self.last_ai_move) if self.last_ai_move else "N/A"
         depth = QUICK_DEBUG_DEPTH if self.quick_debug_mode.get() else max(DEFAULT_TEST_DEPTH, self.search_depth.get())
+        search_mode = self.search_mode.get()
+        time_s = self.Get_Move_Time_Seconds()
+        if search_mode == "time":
+            mode_line = f"Search mode: time ({time_s:.2f}s/move)"
+        elif search_mode == "auto":
+            if self.last_auto_depth is None:
+                mode_line = "Search mode: auto (dynamic depth)"
+            else:
+                mode_line = f"Search mode: auto (last depth {self.last_auto_depth})"
+        else:
+            mode_line = f"Search mode: depth ({depth})"
+
         self.move_panel.config(
             text=(
                 f"Turn: {side_to_move}\n"
                 f"Last AI Move: {last_move}\n"
-                f"Search depth: {depth}\n"
+                f"{mode_line}\n"
                 f"Nodes searched: {Engine.NODES_SEARCHED:,}"
             )
         )
@@ -229,6 +264,19 @@ class ChessUI:
 
     def Toggle_Logging(self):
         Engine.Toggle_Logging(self.logging_enabled.get())
+
+    def Get_Move_Time_Seconds(self) -> float:
+        try:
+            raw_value = max(0.05, float(self.move_time_value.get()))
+        except (tk.TclError, ValueError):
+            raw_value = 1.0
+            self.move_time_value.set(raw_value)
+        if self.move_time_unit.get() == "ms":
+            return max(0.05, raw_value / 1000.0)
+        return raw_value
+
+    def Clear_TT(self):
+        Engine.Clear_Transposition_Table()
 
 if __name__ == "__main__":
     root = tk.Tk()

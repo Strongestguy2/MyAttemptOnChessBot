@@ -1,7 +1,7 @@
 import sys
 import threading
 from Board import Board
-from Engine import Find_Best_Move, ctx
+import Engine
 
 
 def _apply_moves(board: Board, move_tokens: list[str]):
@@ -111,18 +111,21 @@ def uci_loop():
         stop_event.clear()
 
     def emit_info(depth: int, score: float, pv: list[str], elapsed: float):
+        stats = Engine.Get_Search_Stats()
         elapsed_ms = max(1, int(elapsed * 1000))
-        nodes = ctx.nodes_searched
+        nodes = stats["total_nodes"]
         nps = int(nodes / elapsed) if elapsed > 0 else 0
+        score_text = Engine.Format_UCI_Score(score)
         pv_text = f" pv {' '.join(pv)}" if pv else ""
         print(
-            f"info depth {depth} score cp {int(round(score))} nodes {nodes} "
-            f"time {elapsed_ms} nps {nps}{pv_text}"
+            f"info depth {depth} seldepth {stats['seldepth']} score {score_text} "
+            f"nodes {nodes} qnodes {stats['qnodes']} time {elapsed_ms} nps {nps} "
+            f"tbhits 0 hashfull {stats['hashfull_permille']}{pv_text}"
         )
         sys.stdout.flush()
 
     def run_search(local_board: Board, depth: int, time_limit: float | None):
-        best_move = Find_Best_Move(
+        best_move = Engine.Find_Best_Move(
             local_board,
             max_depth=depth,
             time_limit=time_limit,
@@ -147,6 +150,7 @@ def uci_loop():
             print('id name Chess Bot')
             print('id author Python')
             print('option name Clear Hash type button')
+            print('option name Debug Log type check default false')
             print('uciok')
             sys.stdout.flush()
 
@@ -156,13 +160,16 @@ def uci_loop():
 
         elif cmd == 'ucinewgame':
             stop_search(wait=True)
-            ctx.transposition_table.clear()
+            Engine.Clear_Transposition_Table()
             board = Board()
 
         elif cmd == 'setoption':
             joined = ' '.join(parts)
             if 'name Clear Hash' in joined:
-                ctx.transposition_table.clear()
+                Engine.Clear_Transposition_Table()
+            elif 'name Debug Log' in joined and 'value' in parts:
+                value = parts[-1].lower()
+                Engine.Toggle_Detailed_Log(value in ('1', 'true', 'on', 'yes'))
 
         elif cmd == 'position':
             stop_search(wait=True)
