@@ -28,6 +28,8 @@ class ChessUI:
         self.move_time_unit = tk.StringVar(value="sec")
         self.quick_debug_mode = tk.BooleanVar(value=False)
         self.last_auto_depth = None
+        self.ai_is_searching = False
+        self.pending_ai_root_hash = None
 
         self.selected_square = None
         self.valid_moves = []
@@ -97,25 +99,61 @@ class ChessUI:
         return (self.board.white_to_move and self.white_ai.get()) or (not self.board.white_to_move and self.black_ai.get())
 
     def Play_AI_Move(self):
-        depth = QUICK_DEBUG_DEPTH if self.quick_debug_mode.get() else max(DEFAULT_TEST_DEPTH, self.search_depth.get())
-        move_time = self.Get_Move_Time_Seconds()
-        mode = self.search_mode.get()
-        self.last_auto_depth = None
+        if getattr(self, "ai_is_searching", False):
+            return
+        
+        self.ai_is_searching = True
+        
+        import threading
+        
+        # Take a snapshot of the board for the background thread to search on
+        # to prevent the main UI thread from reading search-corrupted states!
+        search_board = self.board.Copy_For_Color(self.board.white_to_move)
+        self.pending_ai_root_hash = self.board.Hash_Board()
+        
+        def ai_worker():
+            root_hash = self.pending_ai_root_hash
+            depth = QUICK_DEBUG_DEPTH if self.quick_debug_mode.get() else max(DEFAULT_TEST_DEPTH, self.search_depth.get())
+            move_time = self.Get_Move_Time_Seconds()
+            mode = self.search_mode.get()
+            self.last_auto_depth = None
 
-        if mode == "time" and not self.quick_debug_mode.get():
-            move = Engine.Find_Best_Move(self.board, max_depth=64, time_limit=move_time)
-        elif mode == "auto" and not self.quick_debug_mode.get():
-            auto_depth = Engine.Estimate_Auto_Depth(self.board, min_depth=3, max_depth=8)
-            self.last_auto_depth = auto_depth
-            move = Engine.Find_Best_Move(self.board, max_depth=auto_depth)
-        else:
-            move = Engine.Find_Best_Move(self.board, max_depth=depth)
+            if mode == "time" and not self.quick_debug_mode.get():
+                move = Engine.Find_Best_Move(search_board, max_depth=64, time_limit=move_time)
+            elif mode == "auto" and not self.quick_debug_mode.get():
+                auto_depth = Engine.Estimate_Auto_Depth(search_board, min_depth=3, max_depth=8, last_time=getattr(self, "last_ai_time", 0.0))
+                self.last_auto_depth = auto_depth
+                move = Engine.Find_Best_Move(search_board, max_depth=auto_depth)
+            else:
+                move = Engine.Find_Best_Move(search_board, max_depth=depth)
+            
+            self.root.after(0, lambda m=move, h=root_hash: self._apply_ai_move(m, h))
+            
+        threading.Thread(target=ai_worker, daemon=True).start()
+
+    def _apply_ai_move(self, move, root_hash):
+        self.ai_is_searching = False
+
+        # Drop stale search results if the board changed while the engine was thinking.
+        if root_hash != self.board.Hash_Board():
+            self.pending_ai_root_hash = None
+            return
+
         if move is None:
+            self.pending_ai_root_hash = None
             self.Check_Endgame()
             return
 
+        legal_moves = self.board.Generate_Legal_Moves()
+        is_legal = any(m == move or m.To_UCI() == move.To_UCI() for m in legal_moves)
+        if not is_legal:
+            self.pending_ai_root_hash = None
+            return
+
+        self.last_ai_time = getattr(Engine.ctx, "total_time_taken", 0.0)
         self.board.Make_Move(move)
         self.last_ai_move = move
+        self.pending_ai_root_hash = None
         self.Check_Endgame()
 
     def Update_Status(self):

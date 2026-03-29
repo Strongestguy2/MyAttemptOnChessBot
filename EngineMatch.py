@@ -81,6 +81,10 @@ def _play_game(
         if move is None:
             return _game_outcome(board), white_m, black_m
 
+        legal_moves = board.Generate_Legal_Moves()
+        if not any(m == move or m.To_UCI() == move.To_UCI() for m in legal_moves):
+            return "draw", white_m, black_m
+
         stats = Engine.Get_Search_Stats()
         target = white_m if side_is_white else black_m
         target.moves += 1

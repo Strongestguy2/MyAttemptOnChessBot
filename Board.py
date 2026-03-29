@@ -98,7 +98,7 @@ class Board:
     def Hash_Board(self) -> str:
         return self.zobrist_key
     
-    def Copy_For_Color(self, white: bool):
+    def Copy_For_Color(self, white: bool, isolate_history: bool = True):
         clone = Board.__new__(Board)
         clone.board = [row[:] for row in self.board]
         clone.white_to_move = white
@@ -107,8 +107,13 @@ class Board:
         clone.halfmove_clock = self.halfmove_clock
         clone.fullmove_number = self.fullmove_number
         clone.move_history = []
-        clone.position_history = self.position_history.copy()
-        clone.track_repetition = self.track_repetition
+        if isolate_history:
+            # Search copies should not mutate repetition data from the UI/game board.
+            clone.position_history = {}
+            clone.track_repetition = False
+        else:
+            clone.position_history = self.position_history.copy()
+            clone.track_repetition = self.track_repetition
         clone.zobrist_key = self.zobrist_key
         clone.white_king_pos = self.white_king_pos
         clone.black_king_pos = self.black_king_pos

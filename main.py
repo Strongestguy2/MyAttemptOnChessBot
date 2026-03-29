@@ -41,7 +41,11 @@ def main():
         raise SystemExit(0 if ok else 1)
 
     if args.structured_games:
-        ok = run_structured_games(current_depth=args.depth, games_per_opening=args.games_per_opening)
+        ok = run_structured_games(
+            current_depth=args.depth,
+            games_per_opening=args.games_per_opening,
+            clear_tt_before_game=True,
+        )
         raise SystemExit(0 if ok else 1)
 
     if args.bench:

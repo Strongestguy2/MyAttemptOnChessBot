@@ -1,4 +1,5 @@
 import time
+import random
 from dataclasses import dataclass
 from typing import List
 
@@ -195,6 +196,125 @@ def run_benchmark(depth: int = 4) -> tuple[bool, str]:
     return all_ok, "\n".join(lines)
 
 
+def _board_signature(board: Board):
+    return (
+        tuple(tuple(row) for row in board.board),
+        board.white_to_move,
+        tuple(sorted(board.castling_rights)),
+        board.en_passant_square,
+        board.halfmove_clock,
+        board.fullmove_number,
+        board.white_king_pos,
+        board.black_king_pos,
+    )
+
+
+def run_consistency_suite(seed: int = 42, steps: int = 300) -> tuple[bool, str]:
+    rng = random.Random(seed)
+    lines = ["=== Consistency Suite ==="]
+    all_ok = True
+
+    board = Board()
+    saved_states = []
+    for _ in range(steps):
+        legal_moves = board.Generate_Legal_Moves()
+        if not legal_moves:
+            break
+        move = rng.choice(legal_moves)
+        saved_states.append((_board_signature(board), board.Hash_Board()))
+        if not board.Make_Move(move):
+            all_ok = False
+            lines.append("[make-undo] FAIL make returned False")
+            break
+
+    while saved_states and all_ok:
+        expected_sig, expected_hash = saved_states.pop()
+        board.Undo_Move()
+        if _board_signature(board) != expected_sig or board.Hash_Board() != expected_hash:
+            all_ok = False
+            lines.append("[make-undo] FAIL board/hash mismatch after undo")
+            break
+
+    if all_ok:
+        lines.append("[make-undo] PASS")
+
+    isolation_board = Board()
+    original_sig = _board_signature(isolation_board)
+    original_hash = isolation_board.Hash_Board()
+    clone = isolation_board.Copy_For_Color(isolation_board.white_to_move)
+    clone_moves = clone.Generate_Legal_Moves()
+    if clone_moves:
+        clone.Make_Move(clone_moves[0])
+    unchanged = _board_signature(isolation_board) == original_sig and isolation_board.Hash_Board() == original_hash
+    if unchanged:
+        lines.append("[copy-isolation] PASS")
+    else:
+        all_ok = False
+        lines.append("[copy-isolation] FAIL source board changed after clone move")
+
+    return all_ok, "\n".join(lines)
+
+
+def run_search_stability_suite(depth: int = 4, repeats: int = 2) -> tuple[bool, str]:
+    positions = [
+        ("startpos", Board.START_FEN),
+        ("open-center", "r1bqkbnr/pppp1ppp/2n5/4p3/2B1P3/5N2/PPPP1PPP/RNBQK2R b KQkq - 2 3"),
+        ("sharp-center", "r1bqkb1r/pppp1ppp/2n2n2/1B2p3/4P3/2N2N2/PPPP1PPP/R1BQK2R b KQkq - 1 4"),
+        ("quiet-endgame", "8/2k5/3p4/3P4/8/2K5/8/8 w - - 0 1"),
+    ]
+
+    all_ok = True
+    lines = ["=== Search Stability Suite ===", f"depth={depth} repeats={repeats}"]
+
+    for name, fen in positions:
+        times_ms = []
+        qratios = []
+        nps_values = []
+        got_move = True
+
+        for _ in range(repeats):
+            board = Board()
+            board.Load_FEN(fen)
+            best = Engine.Find_Best_Move(board, depth)
+            stats = Engine.Get_Search_Stats()
+            if best is None:
+                got_move = False
+                break
+            times_ms.append(stats["time_ms"])
+            qratios.append(stats.get("qratio", 0.0))
+            nps_values.append(stats["nps"])
+
+        if not got_move:
+            all_ok = False
+            lines.append(f"[{name}] FAIL bestmove=none")
+            continue
+
+        avg_time = sum(times_ms) / len(times_ms)
+        min_time = min(times_ms)
+        max_time = max(times_ms)
+        avg_qratio = sum(qratios) / len(qratios)
+        max_qratio = max(qratios)
+        avg_nps = sum(nps_values) / len(nps_values)
+
+        if max_qratio > 6.0:
+            all_ok = False
+
+        lines.append(
+            "[{name}] avg_time_ms={avg_time:.1f} min_time_ms={min_time} max_time_ms={max_time} "
+            "avg_qratio={avg_qratio:.2f} max_qratio={max_qratio:.2f} avg_nps={avg_nps:.0f}".format(
+                name=name,
+                avg_time=avg_time,
+                min_time=min_time,
+                max_time=max_time,
+                avg_qratio=avg_qratio,
+                max_qratio=max_qratio,
+                avg_nps=avg_nps,
+            )
+        )
+
+    return all_ok, "\n".join(lines)
+
+
 def run_full_regression(depth: int = 4) -> bool:
     previous_verbose = Engine.VERBOSE_SEARCH
     Engine.VERBOSE_SEARCH = False
@@ -211,6 +331,12 @@ def run_full_regression(depth: int = 4) -> bool:
         for bench_depth in bench_depths:
             bench_ok, bench_report = run_benchmark(bench_depth)
             results.append((bench_ok, bench_report))
+
+        consistency_ok, consistency_report = run_consistency_suite()
+        results.append((consistency_ok, consistency_report))
+
+        stability_ok, stability_report = run_search_stability_suite(depth=max(3, depth), repeats=2)
+        results.append((stability_ok, stability_report))
 
         print("\n\n".join(r[1] for r in results))
 

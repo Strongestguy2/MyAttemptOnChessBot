@@ -67,9 +67,13 @@ def _play_single_game(
     white_depth: int,
     black_depth: int,
     max_plies: int = 80,
+    clear_tt_before_game: bool = True,
 ) -> str:
     board = Board()
     board.Load_FEN(start_fen)
+
+    if clear_tt_before_game:
+        Engine.Clear_Transposition_Table()
 
     for _ in range(max_plies):
         if board.Is_Fifty_Move_Rule() or board.Is_Threefold_Repetition():
@@ -87,6 +91,10 @@ def _play_single_game(
         if move is None:
             return _game_result(board)
 
+        legal_moves = board.Generate_Legal_Moves()
+        if not any(m == move or m.To_UCI() == move.To_UCI() for m in legal_moves):
+            return "draw"
+
         if not board.Make_Move(move):
             return "draw"
 
@@ -102,6 +110,7 @@ def _run_match_block(
     current_depth: int,
     baseline_depth: int,
     max_plies: int,
+    clear_tt_before_game: bool,
 ) -> tuple[MatchStats, list[str]]:
     stats = MatchStats()
     lines = [f"[{name}] current_as={'white' if current_is_white else 'black'}"]
@@ -116,6 +125,7 @@ def _run_match_block(
                     current_depth,
                     baseline_depth,
                     max_plies,
+                    clear_tt_before_game,
                 )
                 current_score_result = result
             else:
@@ -126,6 +136,7 @@ def _run_match_block(
                     baseline_depth,
                     current_depth,
                     max_plies,
+                    clear_tt_before_game,
                 )
                 if result == "black":
                     current_score_result = "white"
@@ -152,7 +163,12 @@ def _run_match_block(
     return stats, lines
 
 
-def run_structured_games(current_depth: int = 4, games_per_opening: int = 2, max_plies: int = 80) -> bool:
+def run_structured_games(
+    current_depth: int = 4,
+    games_per_opening: int = 2,
+    max_plies: int = 80,
+    clear_tt_before_game: bool = True,
+) -> bool:
     random.seed(42)
     Engine.Toggle_Logging(False)
     previous_verbose = Engine.VERBOSE_SEARCH
@@ -183,6 +199,7 @@ def run_structured_games(current_depth: int = 4, games_per_opening: int = 2, max
             current_depth,
             baseline_depth,
             max_plies,
+            clear_tt_before_game,
         )
         black_stats, black_lines = _run_match_block(
             name,
@@ -193,6 +210,7 @@ def run_structured_games(current_depth: int = 4, games_per_opening: int = 2, max
             current_depth,
             baseline_depth,
             max_plies,
+            clear_tt_before_game,
         )
 
         total_w = white_stats.wins + black_stats.wins

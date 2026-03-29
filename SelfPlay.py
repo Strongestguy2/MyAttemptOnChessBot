@@ -1,6 +1,5 @@
 from Board import Board
 from Engine import Find_Best_Move as Best_Move
-from Engine import Print_Evaluation_Times
 
 def self_play_step_by_step(depth=3, max_moves=100):
     board = Board()
@@ -40,7 +39,6 @@ def self_play_step_by_step(depth=3, max_moves=100):
         print(f"\nMove {move_num + 1}: {'White' if board.white_to_move else 'Black'} plays {best_move}")
         board.Make_Move(best_move)
         board.Print_Board()
-        Print_Evaluation_Times()
 
         move_num += 1
 

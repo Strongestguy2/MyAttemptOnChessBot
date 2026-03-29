@@ -119,8 +119,8 @@ def uci_loop():
         pv_text = f" pv {' '.join(pv)}" if pv else ""
         print(
             f"info depth {depth} seldepth {stats['seldepth']} score {score_text} "
-            f"nodes {nodes} qnodes {stats['qnodes']} time {elapsed_ms} nps {nps} "
-            f"tbhits 0 hashfull {stats['hashfull_permille']}{pv_text}"
+            f"nodes {nodes} time {elapsed_ms} nps {nps} "
+            f"hashfull {stats['hashfull_permille']} string tbhits 0 qnodes {stats['qnodes']}{pv_text}"
         )
         sys.stdout.flush()
 

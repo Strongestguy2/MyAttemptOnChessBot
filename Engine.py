@@ -134,6 +134,10 @@ def _Search_Should_Stop() -> bool:
     return False
 
 
+def _Current_QRatio() -> float:
+    return ctx.quiescence_nodes / max(1, ctx.nodes_searched)
+
+
 def _Store_TT_Entry(key: str, depth: int, score: float, flag: str, move: Move):
     new_entry = TTEntry(depth, score, flag, move, ctx.tt_generation)
     old_entry = ctx.transposition_table.get(key)
@@ -268,6 +272,8 @@ def Get_Hashfull_Permill() -> int:
 def Get_Search_Stats() -> dict:
     elapsed = max(1e-9, ctx.total_time_taken)
     total_nodes = ctx.nodes_searched + ctx.quiescence_nodes
+    qratio = _Current_QRatio()
+    tt_cutoff_rate = (ctx.transposition_cutoffs / max(1, ctx.transposition_hits))
     return {
         "depth": ctx.last_search_depth,
         "seldepth": max(ctx.max_seldepth, ctx.last_search_depth),
@@ -282,14 +288,16 @@ def Get_Search_Stats() -> dict:
         "nps": int(total_nodes / elapsed),
         "tt_hits": ctx.transposition_hits,
         "tt_cutoffs": ctx.transposition_cutoffs,
+        "tt_cutoff_rate": tt_cutoff_rate,
         "hashfull_permille": Get_Hashfull_Permill(),
+        "qratio": qratio,
         "asp_fail_low": ctx.aspiration_fail_lows,
         "asp_fail_high": ctx.aspiration_fail_highs,
         "asp_expands": ctx.aspiration_window_expansions,
     }
 
 
-def Estimate_Auto_Depth(board: Board, min_depth: int = 3, max_depth: int = 8) -> int:
+def Estimate_Auto_Depth(board: Board, min_depth: int = 3, max_depth: int = 8, last_time: float = 0.0, last_nodes: int = 0) -> int:
     min_depth = max(1, int(min_depth))
     max_depth = max(min_depth, int(max_depth))
 
@@ -299,17 +307,6 @@ def Estimate_Auto_Depth(board: Board, min_depth: int = 3, max_depth: int = 8) ->
 
     move_count = len(legal_moves)
     in_check = board.Is_King_In_Check(board.white_to_move)
-    captures = board._Generate_Pseudo_Legal_Capture_Moves()
-
-    non_pawn_pieces = 0
-    total_pieces = 0
-    for row in board.board:
-        for piece in row:
-            if piece == ".":
-                continue
-            total_pieces += 1
-            if piece.upper() in ("N", "B", "R", "Q"):
-                non_pawn_pieces += 1
 
     if move_count >= 36:
         depth = min_depth
@@ -322,12 +319,14 @@ def Estimate_Auto_Depth(board: Board, min_depth: int = 3, max_depth: int = 8) ->
 
     if in_check:
         depth += 1
-    if len(captures) >= 8:
-        depth += 1
-    if non_pawn_pieces <= 6:
-        depth += 1
-    if total_pieces <= 10:
-        depth += 1
+
+    # Soft time adaptation
+    target_time = 2.0  # target 2 seconds per move
+    if last_time > 0:
+        if last_time > target_time * 2:
+            depth -= 1
+        elif last_time < target_time * 0.5:
+            depth += 1
 
     return max(min_depth, min(max_depth, depth))
 
@@ -391,11 +390,27 @@ def Evaluate_Position(board: Board) -> float:
     white_bishop_count = 0
     black_bishop_count = 0
 
+    white_pawns = [[] for _ in range(8)]
+    black_pawns = [[] for _ in range(8)]
+    white_piece_map = {"N": [], "B": [], "R": [], "Q": []}
+    black_piece_map = {"N": [], "B": [], "R": [], "Q": []}
+
     for row in range(8):
         for col in range(8):
             piece = board.board[row][col]
             if piece == ".":
                 continue
+
+            if piece == "P":
+                white_pawns[col].append(row)
+            elif piece == "p":
+                black_pawns[col].append(row)
+
+            if piece.upper() in white_piece_map:
+                if piece.isupper():
+                    white_piece_map[piece.upper()].append((row, col))
+                else:
+                    black_piece_map[piece.upper()].append((row, col))
 
             # Material in centipawns.
             mg_score += piece_values.get(piece, 0)
@@ -440,15 +455,37 @@ def Evaluate_Position(board: Board) -> float:
                     eg_score -= eg_pst
             
     
-    pawn_structure_score = Evaluate_Pawn_Structure(board)
-    open_file_score = Evaluate_Open_Files_And_Rooks(board)
-    king_safety_score = Evaluate_King_Safety(board)
-    mobility_score = Evaluate_Mobility(board)
-    development_score = Evaluate_Development(board)
+    white_rooks_by_col = [0] * 8
+    black_rooks_by_col = [0] * 8
+    for _, col in white_piece_map["R"]:
+        white_rooks_by_col[col] += 1
+    for _, col in black_piece_map["R"]:
+        black_rooks_by_col[col] += 1
+
+    pawn_structure_score = Evaluate_Pawn_Structure(board, white_pawns, black_pawns, phase)
+    open_file_score = Evaluate_Open_Files_And_Rooks(
+        board,
+        white_pawns,
+        black_pawns,
+        white_rooks_by_col,
+        black_rooks_by_col,
+    )
+    rook_activity_score = 0
+    for row, _ in white_piece_map["R"]:
+        if row == 1:
+            rook_activity_score += 12
+    for row, _ in black_piece_map["R"]:
+        if row == 6:
+            rook_activity_score -= 12
+
+    king_safety_score = Evaluate_King_Safety(board, white_piece_map, black_piece_map, white_pawns, black_pawns)
+    mobility_score = Evaluate_Mobility(board, white_piece_map, black_piece_map)
+    development_score = Evaluate_Development(board, phase)
 
     mg_score += (
         pawn_structure_score
         + open_file_score
+        + rook_activity_score
         + 0.75 * king_safety_score
         + 0.60 * mobility_score
         + development_score
@@ -456,6 +493,7 @@ def Evaluate_Position(board: Board) -> float:
     eg_score += (
         pawn_structure_score
         + open_file_score
+        + 1.25 * rook_activity_score
         + 0.20 * king_safety_score
         + 0.80 * mobility_score
         + 0.20 * development_score
@@ -499,25 +537,10 @@ def Evaluate_Position(board: Board) -> float:
     score = (mg_score * phase + eg_score * (24 - phase)) / 24
     return score
 
-def Evaluate_Pawn_Structure (board: Board) -> float:
+def Evaluate_Pawn_Structure(board: Board, white_pawns: list, black_pawns: list, phase: float) -> float:
     score = 0
-    white_pawns = [[] for _ in range(8)]
-    black_pawns = [[] for _ in range(8)]
     white_passed = []
     black_passed = []
-
-    phase = 0
-    phase_weights = {'N': 1, 'B': 1, 'R': 2, 'Q': 4}
-
-    for row in range(8):
-        for col in range(8):
-            piece = board.board[row][col]
-            if piece == "P":
-                white_pawns[col].append(row)
-            elif piece == "p":
-                black_pawns[col].append(row)
-            elif piece != ".":
-                phase += phase_weights.get(piece.upper(), 0)
 
     phase = max(0, min(24, phase))
     endgame_factor = (24 - phase) / 24.0
@@ -595,44 +618,53 @@ def Evaluate_Pawn_Structure (board: Board) -> float:
 
     return score
         
-def Evaluate_Open_Files_And_Rooks (board: Board) -> float:
+def Evaluate_Open_Files_And_Rooks(
+    board: Board,
+    white_pawns: list,
+    black_pawns: list,
+    white_rooks_by_col: list,
+    black_rooks_by_col: list,
+) -> float:
     score = 0
 
     for col in range (8):
-        white_pawn_present = any(board.board[row][col] == "P" for row in range(8))
-        black_pawn_present = any(board.board[row][col] == "p" for row in range(8))
+        white_pawn_present = len(white_pawns[col]) > 0
+        black_pawn_present = len(black_pawns[col]) > 0
+        white_rooks = white_rooks_by_col[col]
+        black_rooks = black_rooks_by_col[col]
 
         #open file
         if not white_pawn_present and not black_pawn_present:
-            for row in range (8):
-                if board.board[row][col] == "R":
-                    score += 18
-                elif board.board[row][col] == "r":
-                    score -= 18
+            score += 18 * white_rooks
+            score -= 18 * black_rooks
 
         #semi-open file
         elif not white_pawn_present:
-            for row in range (8):
-                if board.board[row][col] == "R":
-                    score += 10
+            score += 10 * white_rooks
         elif not black_pawn_present:
-            for row in range (8):
-                if board.board[row][col] == "r":
-                    score -= 10
+            score -= 10 * black_rooks
 
     return score
 
-def Evaluate_King_Safety (board: Board) -> float:
+def Evaluate_King_Safety(
+    board: Board,
+    white_piece_map: dict,
+    black_piece_map: dict,
+    white_pawns: list,
+    black_pawns: list,
+) -> float:
     def side_king_safety(white: bool) -> int:
         king_row, king_col = board.Find_King(white)
         if king_row == -1:
             return 0
 
         own_pawn = "P" if white else "p"
-        enemy_is_white = not white
         shield_row = king_row - 1 if white else king_row + 1
+        own_pawn_files = white_pawns if white else black_pawns
+        enemy_piece_map = black_piece_map if white else white_piece_map
         side_score = 0
 
+        # Pawn shield
         if 0 <= shield_row < 8:
             shield = 0
             for dc in (-1, 0, 1):
@@ -642,50 +674,57 @@ def Evaluate_King_Safety (board: Board) -> float:
             side_score += shield * 8
             side_score -= (3 - shield) * 6
 
+        # Semi-open / open files near king
         for dc in (-1, 0, 1):
             c = king_col + dc
             if not (0 <= c < 8):
                 continue
-            has_own_pawn = any(board.board[r][c] == own_pawn for r in range(8))
+            has_own_pawn = len(own_pawn_files[c]) > 0
             if not has_own_pawn:
-                side_score -= 5
+                side_score -= 8  # Penalty for open file near king
 
-        piece_danger = {'N': 5, 'B': 5, 'R': 7, 'Q': 10}
-        for r in range(8):
-            for c in range(8):
-                piece = board.board[r][c]
-                if piece == "." or piece.isupper() != enemy_is_white:
-                    continue
-                p = piece.upper()
-                if p not in piece_danger:
-                    continue
+        # Tactical threats into king zone
+        king_zone_attackers = 0
+        attack_weight = 0
+        piece_danger = {'N': 20, 'B': 20, 'R': 40, 'Q': 70}
+        
+        for p, locations in enemy_piece_map.items():
+            if p not in piece_danger:
+                continue
+            for r, c in locations:
+                dist_to_king = max(abs(r - king_row), abs(c - king_col))
+                if dist_to_king <= 3:  # Piece is close to king zone
+                    king_zone_attackers += 1
+                    # Base danger scaled by distance
+                    weight = piece_danger[p] * (4 - dist_to_king)
+                    
+                    # Bonus penalty if attackers implies battery (R/Q on same file/rank/diag)
+                    if p in ("R", "Q") and (c == king_col or r == king_row):
+                        weight += 20
+                    if p in ("B", "Q") and abs(r - king_row) == abs(c - king_col):
+                        weight += 15
+                        
+                    attack_weight += weight
 
-                dist = abs(r - king_row) + abs(c - king_col)
-                if dist <= 3:
-                    side_score -= piece_danger[p] * (4 - dist)
+        if king_zone_attackers >= 2:
+            # Nonlinear scaling if multiple pieces attack king zone
+            side_score -= (attack_weight * king_zone_attackers) // 4
+        else:
+            side_score -= attack_weight // 4
 
+        # King centralization penalty early game
         if king_col in (3, 4):
             if white and king_row <= 5:
-                side_score -= 12
+                side_score -= 15
             if (not white) and king_row >= 2:
-                side_score -= 12
-
-        for c in range(max(0, king_col - 1), min(8, king_col + 2)):
-            if any(board.board[r][c] == own_pawn for r in range(8)):
-                continue
-            for r in range(8):
-                piece = board.board[r][c]
-                if piece == "." or piece.isupper() != enemy_is_white:
-                    continue
-                if piece.upper() in ("R", "Q"):
-                    side_score -= 8
+                side_score -= 15
 
         return side_score
 
     white_score = side_king_safety(True)
     black_score = side_king_safety(False)
     score = white_score - black_score
-    return max(-60, min(60, score))
+    return max(-150, min(150, score))
 
 def Evaluate_Space (board):
     whtie_space = 0
@@ -701,7 +740,7 @@ def Evaluate_Space (board):
                 black_space += 1
     return (whtie_space - black_space) * 2
 
-def Evaluate_Mobility (board: Board) -> float:
+def Evaluate_Mobility (board: Board, white_piece_map: dict, black_piece_map: dict) -> float:
     knight_dirs = [(1, 2), (2, 1), (-1, 2), (-2, 1), (1, -2), (2, -1), (-1, -2), (-2, -1)]
     bishop_dirs = [(1, 1), (1, -1), (-1, 1), (-1, -1)]
     rook_dirs = [(1, 0), (-1, 0), (0, 1), (0, -1)]
@@ -717,54 +756,52 @@ def Evaluate_Mobility (board: Board) -> float:
         else:
             black_mobility += amount
 
-    for row in range(8):
-        for col in range(8):
-            piece = board.board[row][col]
-            if piece == ".":
-                continue
+    def accumulate_side_mobility(piece_map: dict, is_white: bool):
+        for p in ("N", "B", "R", "Q"):
+            for row, col in piece_map[p]:
+                if p == "N":
+                    count = 0
+                    for dr, dc in knight_dirs:
+                        r, c = row + dr, col + dc
+                        if 0 <= r < 8 and 0 <= c < 8:
+                            target = board.board[r][c]
+                            if target == "." or target.isupper() != is_white:
+                                count += 1
+                    add_mobility(is_white, count * weights[p])
+                    continue
 
-            is_white = piece.isupper()
-            p = piece.upper()
-            if p not in ("N", "B", "R", "Q"):
-                continue
+                directions = []
+                if p in ("B", "Q"):
+                    directions.extend(bishop_dirs)
+                if p in ("R", "Q"):
+                    directions.extend(rook_dirs)
 
-            if p == "N":
-                count = 0
-                for dr, dc in knight_dirs:
+                reachable = 0
+                for dr, dc in directions:
                     r, c = row + dr, col + dc
-                    if 0 <= r < 8 and 0 <= c < 8:
+                    while 0 <= r < 8 and 0 <= c < 8:
                         target = board.board[r][c]
-                        if target == "." or target.isupper() != is_white:
-                            count += 1
-                add_mobility(is_white, count * weights[p])
-                continue
-
-            directions = []
-            if p in ("B", "Q"):
-                directions.extend(bishop_dirs)
-            if p in ("R", "Q"):
-                directions.extend(rook_dirs)
-
-            reachable = 0
-            for dr, dc in directions:
-                r, c = row + dr, col + dc
-                while 0 <= r < 8 and 0 <= c < 8:
-                    target = board.board[r][c]
-                    if target == ".":
-                        reachable += 1
-                    else:
-                        if target.isupper() != is_white:
+                        if target == ".":
                             reachable += 1
-                        break
-                    r += dr
-                    c += dc
+                        else:
+                            if target.isupper() != is_white:
+                                reachable += 1
+                            break
+                        r += dr
+                        c += dc
 
-            add_mobility(is_white, reachable * weights[p])
+                add_mobility(is_white, reachable * weights[p])
+
+    accumulate_side_mobility(white_piece_map, True)
+    accumulate_side_mobility(black_piece_map, False)
 
     return white_mobility - black_mobility
 
-def Evaluate_Development (board: Board) -> float:
-    # Simple opening development in centipawns.
+def Evaluate_Development (board: Board, phase: float) -> float:
+    # Simple opening development in centipawns. Taper scaled down aggressively by phase.
+    if phase < 16:  # Only mattered in opening/early midgame mostly
+        return 0
+
     score = 0
 
     white_home_minors = [(7, 1, "N"), (7, 6, "N"), (7, 2, "B"), (7, 5, "B")]
@@ -785,7 +822,9 @@ def Evaluate_Development (board: Board) -> float:
         if board.board[sq[0]][sq[1]] == "p":
             score -= 5
 
-    return score
+    # Taper aggressively
+    opening_weight = (phase - 16) / 8.0  # max 1.0 at phase 24 (opening), 0.0 at phase 16 (mid/end)
+    return score * opening_weight
 
 def Evaluate_Pins (board: Board) -> float:
     score = 0
@@ -1051,7 +1090,14 @@ def Quiescence_Search(board: Board, alpha: float, beta: float, ply: int) -> floa
         ctx.max_seldepth = ply
     t0 = time.perf_counter()
 
-    if ctx.quiescence_nodes > 50000:
+    qratio = _Current_QRatio()
+    qnode_budget = min(50000, max(6000, ctx.nodes_searched * 4))
+    if ctx.quiescence_nodes > qnode_budget:
+        t1 = time.perf_counter()
+        ctx.quiescence_time += t1 - t0
+        return Evaluate_Node(board)
+
+    if qratio > 3.5 and ply >= 1:
         t1 = time.perf_counter()
         ctx.quiescence_time += t1 - t0
         return Evaluate_Node(board)
@@ -1074,8 +1120,7 @@ def Quiescence_Search(board: Board, alpha: float, beta: float, ply: int) -> floa
         if stand_pat > alpha:
             alpha = stand_pat
 
-        # Q_DEPTH_LIMIT effectively ignored by removing it or keeping it large, let's keep it safe
-        if ply >= 30: # 30 is deep enough
+        if ply >= Q_DEPTH_LIMIT:
             t1 = time.perf_counter()
             ctx.quiescence_time += t1 - t0
             return stand_pat
@@ -1084,9 +1129,27 @@ def Quiescence_Search(board: Board, alpha: float, beta: float, ply: int) -> floa
 
     Order_Quiescence_Moves(board, noisy_moves)
 
+    # Delta Pruning values
+    piece_values = {'P': 100, 'N': 320, 'B': 330, 'R': 500, 'Q': 900, 'K': 0,
+                    'p': 100, 'n': 320, 'b': 330, 'r': 500, 'q': 900, 'k': 0}
+    if qratio > 2.5:
+        delta_margin = 60
+    elif qratio > 1.7:
+        delta_margin = 90
+    else:
+        delta_margin = 120
+
     for move in noisy_moves:
+        # Delta pruning: skip low-value captures that cannot raise alpha.
+        if not in_check and move.piece_captured:
+            captured_val = piece_values.get(move.piece_captured, 0)
+            # Keep tactical headroom in mate races and for promotions.
+            if alpha < (MATE_SCORE - 500) and stand_pat + captured_val + delta_margin < alpha and not move.is_pawn_promotion:
+                continue
+
         if not board.Make_Move(move):
             continue
+        # After Make_Move, side-to-move is opponent; validate king safety of the side that moved.
         if board.Is_King_In_Check(not board.white_to_move):
             board.Undo_Move()
             continue
@@ -1398,14 +1461,16 @@ def _Print_Search_Stats(board: Board, best_move: Move | None):
         )
 
     timestamp = datetime.datetime.now().isoformat(timespec="seconds")
+    q_ratio = (ctx.quiescence_nodes / max(1, ctx.nodes_searched))
     line = (
         f"[{timestamp}] fen={fen} best={best_move_uci} depth={ctx.last_search_depth} "
         f"seldepth={ctx.max_seldepth} score={score_text} pv=\"{pv_text}\" "
-        f"nodes={ctx.nodes_searched} qnodes={ctx.quiescence_nodes} total_nodes={stats['total_nodes']} "
+        f"nodes={ctx.nodes_searched} qnodes={ctx.quiescence_nodes} qratio={q_ratio:.2f} total_nodes={stats['total_nodes']} "
         f"nps={stats['nps']} time_ms={stats['time_ms']} tt_hits={ctx.transposition_hits} "
         f"tt_cutoffs={ctx.transposition_cutoffs} hashfull={Get_Hashfull_Permill()} "
         f"asp_fail_low={ctx.aspiration_fail_lows} asp_fail_high={ctx.aspiration_fail_highs} "
-        f"asp_expands={ctx.aspiration_window_expansions}"
+        f"asp_expands={ctx.aspiration_window_expansions} "
+        f"t_minimax={ctx.minimax_time:.3f} t_qsearch={ctx.quiescence_time:.3f} t_eval={ctx.evaluate_position_time:.3f}"
     )
     _Append_Log_Line(line)
 
