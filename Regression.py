@@ -1,0 +1,227 @@
+import time
+from dataclasses import dataclass
+from typing import List
+
+import Engine
+from Board import Board
+
+
+@dataclass
+class PerftCase:
+    name: str
+    fen: str
+    depths: dict
+
+
+@dataclass
+class TacticCase:
+    name: str
+    fen: str
+    depth: int
+    expected_moves_uci: List[str]
+    expect_checkmate: bool = False
+
+
+def coord_to_square(coord: tuple[int, int]) -> str:
+    row, col = coord
+    return f"{chr(ord('a') + col)}{8 - row}"
+
+
+def move_to_uci(move) -> str:
+    if move is None:
+        return "none"
+    promo = ""
+    if move.is_pawn_promotion:
+        choice = (move.promotion_choice or "q").lower()
+        promo = choice
+    return f"{coord_to_square(move.start)}{coord_to_square(move.end)}{promo}"
+
+
+def perft(board: Board, depth: int) -> int:
+    if depth == 0:
+        return 1
+    moves = board.Generate_Legal_Moves()
+    if depth == 1:
+        return len(moves)
+
+    nodes = 0
+    for move in moves:
+        if not board.Make_Move(move):
+            continue
+        nodes += perft(board, depth - 1)
+        board.Undo_Move()
+    return nodes
+
+
+def run_perft_suite() -> tuple[bool, str]:
+    cases = [
+        PerftCase(
+            name="startpos",
+            fen=Board.START_FEN,
+            depths={1: 20, 2: 400, 3: 8902, 4: 197281},
+        ),
+        PerftCase(
+            name="kiwipete",
+            fen="r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1",
+            depths={1: 48, 2: 2039, 3: 97862},
+        ),
+        PerftCase(
+            name="ep-and-pins",
+            fen="8/2p5/3p4/KP5r/1R3p1k/8/4P1P1/8 w - - 0 1",
+            depths={1: 14, 2: 191, 3: 2812},
+        ),
+    ]
+
+    all_ok = True
+    lines = ["=== Perft Suite ==="]
+
+    for case in cases:
+        board = Board()
+        board.Load_FEN(case.fen)
+        lines.append(f"[{case.name}]")
+        for depth, expected in sorted(case.depths.items()):
+            t0 = time.perf_counter()
+            got = perft(board, depth)
+            elapsed = time.perf_counter() - t0
+            ok = got == expected
+            all_ok = all_ok and ok
+            status = "PASS" if ok else "FAIL"
+            lines.append(
+                f"  d{depth}: {status} expected={expected} got={got} time={elapsed:.3f}s"
+            )
+
+    return all_ok, "\n".join(lines)
+
+
+def run_tactic_suite() -> tuple[bool, str]:
+    # Fixed tactical smoke tests: mate, hanging pieces, forks, and simple combos.
+    cases = [
+        TacticCase(
+            name="mate-in-1-queen",
+            fen="6k1/5Q2/6K1/8/8/8/8/8 w - - 0 1",
+            depth=3,
+            expected_moves_uci=["f7g7", "f7f8", "f7e8"],
+            expect_checkmate=True,
+        ),
+        TacticCase(
+            name="mate-in-2-pattern",
+            fen="6k1/5ppp/6q1/8/8/6Q1/5PPP/6K1 w - - 0 1",
+            depth=4,
+            expected_moves_uci=["g3b8", "g3b3", "g3b8"],
+            expect_checkmate=False,
+        ),
+        TacticCase(
+            name="win-hanging-queen",
+            fen="4k3/8/8/3q4/4Q3/8/8/4K3 w - - 0 1",
+            depth=3,
+            expected_moves_uci=["e4d5"],
+            expect_checkmate=False,
+        ),
+        TacticCase(
+            name="knight-fork",
+            fen="6k1/5ppp/8/8/3n4/5N2/5PPP/3Q2K1 w - - 0 1",
+            depth=3,
+            expected_moves_uci=["f3d4", "d1d4"],
+            expect_checkmate=False,
+        ),
+        TacticCase(
+            name="simple-combination",
+            fen="r3k2r/ppp2ppp/2n5/3q4/3P4/2N1Q3/PPP2PPP/R3K2R w KQkq - 0 1",
+            depth=3,
+            expected_moves_uci=["e3e8", "c3d5"],
+            expect_checkmate=False,
+        ),
+    ]
+
+    all_ok = True
+    lines = ["=== Tactics Suite ==="]
+    Engine.Toggle_Logging(False)
+
+    def move_is_checkmate(board: Board, move) -> bool:
+        if move is None:
+            return False
+        if not board.Make_Move(move):
+            return False
+        legal = board.Generate_Legal_Moves()
+        in_check = board.Is_King_In_Check(board.white_to_move)
+        board.Undo_Move()
+        return len(legal) == 0 and in_check
+
+    for case in cases:
+        board = Board()
+        board.Load_FEN(case.fen)
+        best = Engine.Find_Best_Move(board, case.depth)
+        uci = move_to_uci(best)
+        in_expected = uci in case.expected_moves_uci
+        is_mate = move_is_checkmate(board, best)
+        ok = is_mate if case.expect_checkmate else in_expected
+        all_ok = all_ok and ok
+        status = "PASS" if ok else "FAIL"
+        lines.append(
+            f"[{case.name}] {status} depth={case.depth} best={uci} expected={case.expected_moves_uci} checkmate={is_mate}"
+        )
+
+    return all_ok, "\n".join(lines)
+
+
+def run_benchmark(depth: int = 4) -> tuple[bool, str]:
+    positions = [
+        ("startpos", Board.START_FEN),
+        ("open-center", "r1bqkbnr/pppp1ppp/2n5/4p3/2B1P3/5N2/PPPP1PPP/RNBQK2R b KQkq - 2 3"),
+        ("quiet-endgame", "8/2k5/3p4/3P4/8/2K5/8/8 w - - 0 1"),
+    ]
+
+    Engine.Toggle_Logging(False)
+
+    lines = ["=== Benchmark ===", f"depth={depth}"]
+    all_ok = True
+
+    for name, fen in positions:
+        board = Board()
+        board.Load_FEN(fen)
+
+        t0 = time.perf_counter()
+        best = Engine.Find_Best_Move(board, depth)
+        elapsed = time.perf_counter() - t0
+
+        ok = best is not None
+        all_ok = all_ok and ok
+        lines.append(
+            f"[{name}] best={move_to_uci(best)} score_cp={Engine.LAST_ROOT_SCORE:+.0f} "
+            f"nodes={Engine.NODES_SEARCHED} time={elapsed:.3f}s "
+            f"nps={(int(Engine.NODES_SEARCHED / elapsed) if elapsed > 0 else 0)}"
+        )
+
+    return all_ok, "\n".join(lines)
+
+
+def run_full_regression(depth: int = 4) -> bool:
+    previous_verbose = Engine.VERBOSE_SEARCH
+    Engine.VERBOSE_SEARCH = False
+    try:
+        results = []
+
+        perft_ok, perft_report = run_perft_suite()
+        results.append((perft_ok, perft_report))
+
+        tactics_ok, tactics_report = run_tactic_suite()
+        results.append((tactics_ok, tactics_report))
+
+        bench_depths = [3] if depth <= 3 else [3, depth]
+        for bench_depth in bench_depths:
+            bench_ok, bench_report = run_benchmark(bench_depth)
+            results.append((bench_ok, bench_report))
+
+        print("\n\n".join(r[1] for r in results))
+
+        all_ok = all(r[0] for r in results)
+        print("\n=== Regression Summary ===")
+        print(f"overall={'PASS' if all_ok else 'FAIL'}")
+        return all_ok
+    finally:
+        Engine.VERBOSE_SEARCH = previous_verbose
+
+
+if __name__ == "__main__":
+    success = run_full_regression(depth=4)
+    raise SystemExit(0 if success else 1)
