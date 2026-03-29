@@ -11,6 +11,7 @@ class Move:
             promotion_choice: Optional[str] = None,
             is_en_passant: bool = False,
             is_castling: bool = False,
+            gives_check: bool = False,
     ):
         self.start = start
         self.end = end
@@ -20,6 +21,7 @@ class Move:
         self.promotion_choice = promotion_choice
         self.is_en_passant = is_en_passant
         self.is_castling = is_castling
+        self.gives_check = gives_check
 
     def __str__ (self):
         return f"{self.piece_moved} {self.start} -> {self.end}" + \
@@ -56,3 +58,8 @@ class Move:
             )
         )
     
+    def To_UCI(self):
+        start_sq = chr(self.start[1] + ord('a')) + str(8 - self.start[0])
+        end_sq = chr(self.end[1] + ord('a')) + str(8 - self.end[0])
+        promo = ('' if not self.is_pawn_promotion else self.promotion_choice.lower())
+        return start_sq + end_sq + promo
