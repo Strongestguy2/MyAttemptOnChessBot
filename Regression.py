@@ -203,6 +203,7 @@ def run_benchmark(depth: int = 4) -> tuple[bool, str]:
     for name, fen in positions:
         board = Board()
         board.Load_FEN(fen)
+        Engine.Clear_Transposition_Table()
 
         t0 = time.perf_counter()
         best = Engine.Find_Best_Move(board, depth)
@@ -458,6 +459,7 @@ def run_search_stability_suite(depth: int = 4, repeats: int = 2) -> tuple[bool, 
 
     all_ok = True
     lines = ["=== Search Stability Suite ===", f"depth={depth} repeats={repeats}"]
+    Engine.Toggle_Logging(False)
 
     for name, fen in positions:
         times_ms = []
@@ -468,6 +470,7 @@ def run_search_stability_suite(depth: int = 4, repeats: int = 2) -> tuple[bool, 
         for _ in range(repeats):
             board = Board()
             board.Load_FEN(fen)
+            Engine.Clear_Transposition_Table()
             best = Engine.Find_Best_Move(board, depth)
             stats = Engine.Get_Search_Stats()
             if best is None:
@@ -524,6 +527,7 @@ def run_profile_suite(search_depth: int = 3, perft_depth: int = 3) -> tuple[bool
     Engine.Toggle_Logging(False)
     lines = ["=== Profile Suite ==="]
 
+    Engine.Clear_Transposition_Table()
     search_board = Board()
     search_report = _profile_top_lines(
         f"search-depth-{search_depth}",
@@ -532,6 +536,7 @@ def run_profile_suite(search_depth: int = 3, perft_depth: int = 3) -> tuple[bool
     lines.append(search_report)
     lines.append(f"[search-stats] {Engine.Get_Search_Stats()}")
 
+    Engine.Clear_Transposition_Table()
     perft_board = Board()
     perft_report = _profile_top_lines(
         f"perft-depth-{perft_depth}",
@@ -544,7 +549,9 @@ def run_profile_suite(search_depth: int = 3, perft_depth: int = 3) -> tuple[bool
 
 def run_full_regression(depth: int = 4) -> bool:
     previous_verbose = Engine.VERBOSE_SEARCH
+    previous_logging = Engine.LOGGING_ENABLED
     Engine.VERBOSE_SEARCH = False
+    Engine.Toggle_Logging(False)
     try:
         results = []
 
@@ -588,6 +595,7 @@ def run_full_regression(depth: int = 4) -> bool:
         return all_ok
     finally:
         Engine.VERBOSE_SEARCH = previous_verbose
+        Engine.Toggle_Logging(previous_logging)
 
 
 if __name__ == "__main__":
