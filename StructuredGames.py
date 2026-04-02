@@ -52,12 +52,8 @@ def _engine_policy(board: Board, depth: int) -> object:
 
 
 def _game_result(board: Board) -> str:
-    legal = board.Generate_Legal_Moves()
-    if legal:
-        return "ongoing"
-    if board.Is_King_In_Check(board.white_to_move):
-        return "black" if board.white_to_move else "white"
-    return "draw"
+    result, _ = board.Get_Game_Result()
+    return result
 
 
 def _play_single_game(

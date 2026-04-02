@@ -1,4 +1,4 @@
-from typing import Optional, Tuple, List, Set
+from typing import Optional, Tuple, List
 from Move import Move
 from Zobrist import hash_board, ZOBRIST_PIECES, ZOBRIST_CASTLING, ZOBRIST_EN_PASSANT, ZOBRIST_TURN
 
@@ -121,16 +121,16 @@ class Board:
     
     def Get_Pseudo_Legal_Moves (self, include_castling = True) -> list:
         moves = []
+        side_to_move_is_white = self.white_to_move
         for row in range(8):
+            board_row = self.board[row]
             for col in range(8):
-                piece = self.board[row][col]
+                piece = board_row[col]
                 if piece == '.':
                     continue
 
-                if self.white_to_move and piece.isupper():
-                    self._Generate_Piece_Moves (piece, row, col, moves, include_castling)
-                elif not self.white_to_move and piece.islower():
-                    self._Generate_Piece_Moves (piece, row, col, moves, include_castling)
+                if piece.isupper() == side_to_move_is_white:
+                    self._Generate_Piece_Moves(piece, row, col, moves, include_castling)
         return moves
     
     def _Generate_Piece_Moves(
@@ -167,7 +167,6 @@ class Board:
     def _Generate_Pawn_Moves (self, row: int, col: int, moves: list, is_white: bool):
         direction = -1 if is_white else 1
         start_row = 6 if is_white else 1
-        enemy_pieces = [p.lower() for p in "PNBRQK"] if is_white else [p.upper() for p in "PNBRQK"]
         promotion_choice = 'Q' if is_white else 'q'
 
         one_forward = row + direction
@@ -188,7 +187,7 @@ class Board:
             new_row = row + direction
             if 0 <= new_col < 8 and 0 <= new_row < 8:
                 target = self.board[new_row][new_col]
-                if target in enemy_pieces:
+                if target != "." and target.isupper() != is_white:
                     if new_row == 0 or new_row == 7:
                         moves.append(Move((row, col), (new_row, new_col), self.board[row][col], target, is_pawn_promotion=True, promotion_choice=promotion_choice))
                     else:
@@ -202,14 +201,13 @@ class Board:
 
     def _Generate_Knight_Moves (self, row: int, col: int, moves: list, is_white: bool):
         directions = [(1, 2), (2, 1), (-1, 2), (-2, 1), (1, -2), (2, -1), (-1, -2), (-2, -1)]
-        ally_pieces = [p.upper() for p in "PNBRQK"] if is_white else [p.lower() for p in "PNBRQK"]
 
         for dr, dc in directions:
             r, c = row + dr, col + dc
 
             if 0 <= r < 8 and 0 <= c < 8:
                 target = self.board[r][c]
-                if target == '.' or target not in ally_pieces:
+                if target == '.' or target.isupper() != is_white:
                     moves.append (Move((row, col), (r, c), self.board[row][col], target if target != '.' else None))
     
     def _Generate_Bishop_Moves (self, row: int, col: int, moves: list, is_white: bool):
@@ -226,25 +224,22 @@ class Board:
 
     def _Generate_King_Moves (self, row: int, col: int, moves: list, is_white: bool):
         directions = [(1, 1), (1, -1), (-1, 1), (-1, -1), (1, 0), (-1, 0), (0, 1), (0, -1)]
-        ally_pieces = [p.upper() for p in "PNBRQK"] if is_white else [p.lower() for p in "PNBRQK"]
 
         for dr, dc in directions:
             r, c = row + dr, col + dc
             if 0 <= r < 8 and 0 <= c < 8:
                 target = self.board[r][c]
-                if target == '.' or target not in ally_pieces:
+                if target == '.' or target.isupper() != is_white:
                     moves.append(Move((row, col), (r, c), self.board[row][col], target if target != '.' else None))
 
     def _Slide_Moves (self, row: int, col: int, directions: List[Tuple[int, int]], moves: list, is_white: bool):
-        ally_pieces = [p.upper() for p in "PNBRQK"] if is_white else [p.lower() for p in "PNBRQK"]
-
         for dr, dc in directions:
             r, c = row + dr, col + dc
             while 0 <= r < 8 and 0 <= c < 8:
                 target = self.board[r][c]
                 if target == '.':
                     moves.append (Move((row, col), (r, c), self.board[row][col]))
-                elif target in ally_pieces:
+                elif target.isupper() == is_white:
                     break
                 elif target.lower() == 'k':
                     break
@@ -339,19 +334,26 @@ class Board:
 
         return False
 
+    def _Filter_Legal_Moves(self, pseudo_moves: list) -> list:
+        legal_moves = []
+        append_move = legal_moves.append
+
+        for move in pseudo_moves:
+            self.Make_Move(move)
+            if not self.Is_King_In_Check(not self.white_to_move):
+                append_move(move)
+            self.Undo_Move()
+
+        return legal_moves
+
 
     def Generate_Legal_Moves(self, include_castling=True) -> list:
         import time
         t0 = time.perf_counter()
-        
+
         pseudo_moves = self.Get_Pseudo_Legal_Moves(include_castling)
-        legal_moves = []
-        for move in pseudo_moves:
-            self.Make_Move(move)
-            if not self.Is_King_In_Check(move.piece_moved.isupper()):
-                legal_moves.append(move)
-            self.Undo_Move()
-            
+        legal_moves = self._Filter_Legal_Moves(pseudo_moves)
+
         t1 = time.perf_counter()
         Board.FIND_LEGAL_MOVES_TIME += t1 - t0
         return legal_moves
@@ -359,15 +361,10 @@ class Board:
     def Generate_Legal_Capture_Moves(self) -> list:
         import time
         t0 = time.perf_counter()
-        
+
         pseudo_noisy_moves = self._Generate_Pseudo_Legal_Capture_Moves()
-        legal_capture_moves = []
-        for move in pseudo_noisy_moves:
-            self.Make_Move(move)
-            if not self.Is_King_In_Check(move.piece_moved.isupper()):
-                legal_capture_moves.append(move)
-            self.Undo_Move()
-            
+        legal_capture_moves = self._Filter_Legal_Moves(pseudo_noisy_moves)
+
         t1 = time.perf_counter()
         Board.FIND_LEGAL_MOVES_TIME += t1 - t0
         return legal_capture_moves
@@ -617,3 +614,18 @@ class Board:
     
     def Is_Fifty_Move_Rule (self) -> bool:
         return self.halfmove_clock >= 100
+
+    def Get_Game_Result(self, legal_moves: Optional[list] = None) -> tuple[str, str]:
+        if self.Is_Fifty_Move_Rule():
+            return ("draw", "fifty_move_rule")
+        if self.Is_Threefold_Repetition():
+            return ("draw", "threefold_repetition")
+
+        if legal_moves is None:
+            legal_moves = self.Generate_Legal_Moves()
+
+        if legal_moves:
+            return ("ongoing", "ongoing")
+        if self.Is_King_In_Check(self.white_to_move):
+            return ("black" if self.white_to_move else "white", "checkmate")
+        return ("draw", "stalemate")

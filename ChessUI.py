@@ -29,12 +29,15 @@ class ChessUI:
         self.quick_debug_mode = tk.BooleanVar(value=False)
         self.last_auto_depth = None
         self.ai_is_searching = False
+        self.ai_search_token = 0
         self.pending_ai_root_hash = None
 
         self.selected_square = None
         self.valid_moves = []
         self.last_ai_move = None
         self.game_over = False
+        self.game_result_latch = None
+        self.current_eval_cp = 0.0
 
         self.canvas = tk.Canvas(root, width=BOARD_SIZE*SQUARE_SIZE, height=BOARD_SIZE*SQUARE_SIZE)
         self.canvas.grid(row=0, column=1)
@@ -82,6 +85,7 @@ class ChessUI:
 
         # Keep engine logging state aligned with the UI toggle from startup.
         self.Toggle_Logging()
+        self.Refresh_Eval_Cache()
 
         self.Draw_Board()
         self.Update_Status()
@@ -103,6 +107,8 @@ class ChessUI:
             return
         
         self.ai_is_searching = True
+        self.ai_search_token += 1
+        search_token = self.ai_search_token
         
         import threading
         
@@ -127,15 +133,15 @@ class ChessUI:
             else:
                 move = Engine.Find_Best_Move(search_board, max_depth=depth)
             
-            self.root.after(0, lambda m=move, h=root_hash: self._apply_ai_move(m, h))
+            self.root.after(0, lambda m=move, h=root_hash, token=search_token: self._apply_ai_move(m, h, token))
             
         threading.Thread(target=ai_worker, daemon=True).start()
 
-    def _apply_ai_move(self, move, root_hash):
+    def _apply_ai_move(self, move, root_hash, search_token):
         self.ai_is_searching = False
 
         # Drop stale search results if the board changed while the engine was thinking.
-        if root_hash != self.board.Hash_Board():
+        if search_token != self.ai_search_token or root_hash != self.board.Hash_Board():
             self.pending_ai_root_hash = None
             return
 
@@ -154,6 +160,7 @@ class ChessUI:
         self.board.Make_Move(move)
         self.last_ai_move = move
         self.pending_ai_root_hash = None
+        self.Refresh_Eval_Cache()
         self.Check_Endgame()
 
     def Update_Status(self):
@@ -209,7 +216,7 @@ class ChessUI:
 
     def Draw_Eval_Bar (self):
         self.eval_canvas.delete("all")
-        score_cp = Engine.Evaluate_Position(self.board)
+        score_cp = self.current_eval_cp
         height = BOARD_SIZE * SQUARE_SIZE
 
         # Map centipawn score to bar position with smooth saturation.
@@ -264,6 +271,7 @@ class ChessUI:
                 if move.end == (row, col):
                     self.board.Make_Move(move)
                     self.Reset_Selection()
+                    self.Refresh_Eval_Cache()
                     self.Check_Endgame()
                     return
             self.Reset_Selection()
@@ -273,30 +281,68 @@ class ChessUI:
         self.valid_moves = []
 
     def Check_Endgame (self):
-        if not self.board.Generate_Legal_Moves():
-            winner = "Black" if self.board.white_to_move else "White"
-            if self.board.Is_King_In_Check ():
-                messagebox.showinfo("Game Over", f"{winner} wins by checkmate!")
-            else:
-                messagebox.showinfo("Game Over", "It's a draw!")
+        result, reason = self.board.Get_Game_Result()
+        if result == "ongoing":
+            return
+
+        latch = (self.board.Hash_Board(), result, reason)
+        if self.game_result_latch == latch:
             self.game_over = True
+            return
+
+        self.game_over = True
+        self.game_result_latch = latch
+        self.pending_ai_root_hash = None
+
+        if reason == "checkmate":
+            message = f"{result.capitalize()} wins by checkmate!"
+        elif reason == "stalemate":
+            message = "Draw by stalemate."
+        elif reason == "threefold_repetition":
+            message = "Draw by threefold repetition."
+        elif reason == "fifty_move_rule":
+            message = "Draw by fifty-move rule."
+        else:
+            message = "It's a draw!"
+
+        self.Refresh_Eval_Cache()
+        messagebox.showinfo("Game Over", message)
+
+    def Refresh_Eval_Cache(self):
+        result, reason = self.board.Get_Game_Result()
+        if reason == "checkmate":
+            self.current_eval_cp = -Engine.MATE_SCORE if self.board.white_to_move else Engine.MATE_SCORE
+        elif result == "draw":
+            self.current_eval_cp = 0.0
+        else:
+            self.current_eval_cp = Engine.Evaluate_Position(self.board)
 
     def Undo (self):
+        self.ai_search_token += 1
+        self.ai_is_searching = False
+        self.pending_ai_root_hash = None
         if self.board.move_history:
             self.board.Undo_Move()
             if self.board.move_history and self.Is_AI_Turn() and (self.white_ai.get() != self.black_ai.get()):
                 self.board.Undo_Move()
             self.game_over = False
+            self.game_result_latch = None
             self.last_ai_move = None
             self.Reset_Selection()
+            self.Refresh_Eval_Cache()
             self.Draw_Board()
             self.Update_Status()
 
     def Restart (self):
+        self.ai_search_token += 1
+        self.ai_is_searching = False
+        self.pending_ai_root_hash = None
         self.board = Board()
         self.game_over = False
+        self.game_result_latch = None
         self.last_ai_move = None
         self.Reset_Selection()
+        self.Refresh_Eval_Cache()
         self.Draw_Board()
         self.Update_Status()
 

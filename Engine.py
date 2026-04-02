@@ -20,6 +20,7 @@ class TTEntry:
 class EngineSearchContext:
     def __init__(self):
         self.transposition_table = {}
+        self.eval_cache = {}
         self.killer_moves = {}
         self.history_heuristic = {}
         self.nodes_searched = 0
@@ -75,17 +76,38 @@ def __getattr__(name):
 
 Q_DEPTH_LIMIT = 2
 MATE_SCORE = 10000
+MATE_TT_THRESHOLD = MATE_SCORE - 1000
 SEE_ENABLED = False
 MAX_TT_SIZE = 200000
+MAX_EVAL_CACHE_SIZE = 50000
 TEMPO_BONUS = 10
 ENABLE_NULL_MOVE_PRUNING = True
-ENABLE_LATE_MOVE_PRUNING = False
+ENABLE_LATE_MOVE_PRUNING = True
 LOGGING_ENABLED = True
 DETAILED_LOG_ENABLED = False
 LOG_FILE = "chess_engine_log.txt"
 VERBOSE_SEARCH = True
 TT_MOVE_BONUS = 30000
 CHECK_MOVE_BONUS = 1200
+PIECE_VALUES_CP = {
+    'P': 100, 'N': 320, 'B': 330, 'R': 500, 'Q': 900, 'K': 0,
+    'p': -100, 'n': -320, 'b': -330, 'r': -500, 'q': -900, 'k': 0,
+}
+ABS_PIECE_VALUES = {
+    'P': 100, 'N': 320, 'B': 330, 'R': 500, 'Q': 900, 'K': 0,
+    'p': 100, 'n': 320, 'b': 330, 'r': 500, 'q': 900, 'k': 0,
+}
+PHASE_WEIGHTS = {'N': 1, 'B': 1, 'R': 2, 'Q': 4}
+KNIGHT_DIRS = [(1, 2), (2, 1), (-1, 2), (-2, 1), (1, -2), (2, -1), (-1, -2), (-2, -1)]
+BISHOP_DIRS = [(1, 1), (1, -1), (-1, 1), (-1, -1)]
+ROOK_DIRS = [(1, 0), (-1, 0), (0, 1), (0, -1)]
+CENTER_SQUARES = ((3, 3), (3, 4), (4, 3), (4, 4))
+EXTENDED_CENTER_SQUARES = (
+    (2, 2), (2, 3), (2, 4), (2, 5),
+    (3, 2), (3, 3), (3, 4), (3, 5),
+    (4, 2), (4, 3), (4, 4), (4, 5),
+    (5, 2), (5, 3), (5, 4), (5, 5),
+)
 
 def Reset_Search_Stats():
 
@@ -138,8 +160,48 @@ def _Current_QRatio() -> float:
     return ctx.quiescence_nodes / max(1, ctx.nodes_searched)
 
 
-def _Store_TT_Entry(key: str, depth: int, score: float, flag: str, move: Move):
-    new_entry = TTEntry(depth, score, flag, move, ctx.tt_generation)
+def _Score_To_TT(score: float, ply: int) -> float:
+    if score >= MATE_TT_THRESHOLD:
+        return score + ply
+    if score <= -MATE_TT_THRESHOLD:
+        return score - ply
+    return score
+
+
+def _Score_From_TT(score: float, ply: int) -> float:
+    if score >= MATE_TT_THRESHOLD:
+        return score - ply
+    if score <= -MATE_TT_THRESHOLD:
+        return score + ply
+    return score
+
+
+def _Probe_TT(key: int, depth: int, alpha: float, beta: float, ply: int) -> tuple[TTEntry | None, float, float, float | None]:
+    entry = ctx.transposition_table.get(key)
+    if entry is None:
+        return None, alpha, beta, None
+
+    ctx.transposition_hits += 1
+    tt_score = _Score_From_TT(entry.score, ply)
+
+    if entry.depth >= depth:
+        if entry.flag == 'EXACT':
+            ctx.transposition_cutoffs += 1
+            return entry, alpha, beta, tt_score
+        if entry.flag == 'LOWER':
+            alpha = max(alpha, tt_score)
+        elif entry.flag == 'UPPER':
+            beta = min(beta, tt_score)
+
+        if alpha >= beta:
+            ctx.transposition_cutoffs += 1
+            return entry, alpha, beta, tt_score
+
+    return entry, alpha, beta, None
+
+
+def _Store_TT_Entry(key: str, depth: int, score: float, flag: str, move: Move, ply: int):
+    new_entry = TTEntry(depth, _Score_To_TT(score, ply), flag, move, ctx.tt_generation)
     old_entry = ctx.transposition_table.get(key)
     if old_entry is not None:
         if depth > old_entry.depth or (depth == old_entry.depth and flag == 'EXACT' and old_entry.flag != 'EXACT'):
@@ -330,17 +392,11 @@ def Estimate_Auto_Depth(board: Board, min_depth: int = 3, max_depth: int = 8, la
 
     return max(min_depth, min(max_depth, depth))
 
-def Order_Moves(board: Board, moves: list, depth: int):
-    tt_move = None
-    key = board.Hash_Board()
-    entry = ctx.transposition_table.get(key)
-    if entry is not None:
-        tt_move = entry.move
-
+def Order_Moves(board: Board, moves: list, depth: int, tt_move: Move | None = None):
     scored_moves = []
     for move in moves:
         score = Score_Move(board, move, depth)
-        if tt_move is not None and move == tt_move:
+        if tt_move is not None and (move == tt_move or move.To_UCI() == tt_move.To_UCI()):
             score += TT_MOVE_BONUS
         scored_moves.append((score, move))
 
@@ -348,11 +404,14 @@ def Order_Moves(board: Board, moves: list, depth: int):
     moves[:] = [move for _, move in scored_moves]
 
 def Order_Quiescence_Moves(board: Board, moves: list):
-    PIECE_VALUES = {
-        'P': 100, 'N': 320, 'B': 330, 'R': 500, 'Q': 900, 'K': 0,
-        'p': -100, 'n': -320, 'b': -330, 'r': -500, 'q': -900, 'k': 0,
-    }
-    moves.sort(key=lambda m: PIECE_VALUES.get((m.piece_captured or "").upper(), 0) * 10 - PIECE_VALUES.get((m.piece_moved or "").upper(), 0), reverse=True)
+    moves.sort(
+        key=lambda m: (
+            1 if m.is_pawn_promotion else 0,
+            1 if m.gives_check else 0,
+            ABS_PIECE_VALUES.get(m.piece_captured or "", 0) * 10 - ABS_PIECE_VALUES.get(m.piece_moved or "", 0),
+        ),
+        reverse=True,
+    )
 
 def Move_Gives_Check(board: Board, move: Move, cache: dict) -> bool:
     cache_key = hash(move)
@@ -374,21 +433,75 @@ def Get_PVS_Window(alpha: float, beta: float, maximizing: bool) -> tuple[float, 
         return alpha, min(beta, alpha + 1)
     return max(alpha, beta - 1), beta
 
-def Evaluate_Position(board: Board) -> float:
-    import time
-    t0 = time.perf_counter()
+def _Store_Eval_Cache(key: int, score: float):
+    if len(ctx.eval_cache) >= MAX_EVAL_CACHE_SIZE:
+        ctx.eval_cache.pop(next(iter(ctx.eval_cache)))
+    ctx.eval_cache[key] = score
 
-    piece_values = {
-        'P': 100, 'N': 320, 'B': 330, 'R': 500, 'Q': 900, 'K': 0,
-        'p': -100, 'n': -320, 'b': -330, 'r': -500, 'q': -900, 'k': 0,
-    }
-    phase_weights = {'N': 1, 'B': 1, 'R': 2, 'Q': 4}
+
+def Evaluate_Endgame_King_Activity(board: Board, phase: int, white_piece_map: dict, black_piece_map: dict) -> float:
+    if phase > 10:
+        return 0.0
+
+    white_king = board.Find_King(True)
+    black_king = board.Find_King(False)
+    if white_king == (-1, -1) or black_king == (-1, -1):
+        return 0.0
+
+    endgame_weight = (10 - phase) / 10.0
+
+    def king_center_bonus(square: tuple[int, int]) -> float:
+        row, col = square
+        return 7 - (abs(row - 3.5) + abs(col - 3.5))
+
+    queen_count = len(white_piece_map["Q"]) + len(black_piece_map["Q"])
+    scale = 1.0 if queen_count == 0 else 0.5
+    return (
+        (king_center_bonus(white_king) - king_center_bonus(black_king))
+        * 4.0
+        * endgame_weight
+        * scale
+    )
+
+
+def Evaluate_Mop_Up(board: Board, phase: int, white_material: int, black_material: int) -> float:
+    if phase > 8:
+        return 0.0
+
+    white_king = board.Find_King(True)
+    black_king = board.Find_King(False)
+    if white_king == (-1, -1) or black_king == (-1, -1):
+        return 0.0
+
+    material_edge = white_material - black_material
+    if abs(material_edge) < 350:
+        return 0.0
+
+    winning_white = material_edge > 0
+    winner_king = white_king if winning_white else black_king
+    loser_king = black_king if winning_white else white_king
+    king_distance = abs(winner_king[0] - loser_king[0]) + abs(winner_king[1] - loser_king[1])
+    loser_from_center = abs(loser_king[0] - 3.5) + abs(loser_king[1] - 3.5)
+    endgame_weight = (8 - phase) / 8.0
+    score = (14 - king_distance) * 8 + loser_from_center * 12
+    return score * endgame_weight if winning_white else -score * endgame_weight
+
+
+def Evaluate_Position(board: Board) -> float:
+    t0 = time.perf_counter()
+    key = board.Hash_Board()
+    cached_score = ctx.eval_cache.get(key)
+    if cached_score is not None:
+        ctx.evaluate_position_time += time.perf_counter() - t0
+        return cached_score
 
     mg_score = TEMPO_BONUS if board.white_to_move else -TEMPO_BONUS
     eg_score = mg_score
     phase = 0
     white_bishop_count = 0
     black_bishop_count = 0
+    white_material = 0
+    black_material = 0
 
     white_pawns = [[] for _ in range(8)]
     black_pawns = [[] for _ in range(8)]
@@ -413,10 +526,15 @@ def Evaluate_Position(board: Board) -> float:
                     black_piece_map[piece.upper()].append((row, col))
 
             # Material in centipawns.
-            mg_score += piece_values.get(piece, 0)
-            eg_score += piece_values.get(piece, 0)
+            piece_value = PIECE_VALUES_CP.get(piece, 0)
+            mg_score += piece_value
+            eg_score += piece_value
+            if piece.isupper():
+                white_material += ABS_PIECE_VALUES.get(piece, 0)
+            else:
+                black_material += ABS_PIECE_VALUES.get(piece, 0)
 
-            phase += phase_weights.get(piece.upper(), 0)
+            phase += PHASE_WEIGHTS.get(piece.upper(), 0)
 
             # Piece-square tables from tables.py are pawn=10 scale; convert to cp.
             table_row = row if piece.isupper() else 7 - row
@@ -481,6 +599,15 @@ def Evaluate_Position(board: Board) -> float:
     king_safety_score = Evaluate_King_Safety(board, white_piece_map, black_piece_map, white_pawns, black_pawns)
     mobility_score = Evaluate_Mobility(board, white_piece_map, black_piece_map)
     development_score = Evaluate_Development(board, phase)
+    endgame_king_score = Evaluate_Endgame_King_Activity(board, phase, white_piece_map, black_piece_map)
+    mop_up_score = Evaluate_Mop_Up(board, phase, white_material, black_material)
+    queen_activity_score = 0
+    for row, col in white_piece_map["Q"]:
+        if (row, col) in EXTENDED_CENTER_SQUARES:
+            queen_activity_score += 8
+    for row, col in black_piece_map["Q"]:
+        if (row, col) in EXTENDED_CENTER_SQUARES:
+            queen_activity_score -= 8
 
     mg_score += (
         pawn_structure_score
@@ -489,6 +616,7 @@ def Evaluate_Position(board: Board) -> float:
         + 0.75 * king_safety_score
         + 0.60 * mobility_score
         + development_score
+        + 0.60 * queen_activity_score
     )
     eg_score += (
         pawn_structure_score
@@ -497,6 +625,9 @@ def Evaluate_Position(board: Board) -> float:
         + 0.20 * king_safety_score
         + 0.80 * mobility_score
         + 0.20 * development_score
+        + endgame_king_score
+        + mop_up_score
+        + 0.25 * queen_activity_score
     )
     
 
@@ -535,6 +666,7 @@ def Evaluate_Position(board: Board) -> float:
 
     phase = max(0, min(24, phase))
     score = (mg_score * phase + eg_score * (24 - phase)) / 24
+    _Store_Eval_Cache(key, score)
     return score
 
 def Evaluate_Pawn_Structure(board: Board, white_pawns: list, black_pawns: list, phase: float) -> float:
@@ -741,9 +873,6 @@ def Evaluate_Space (board):
     return (whtie_space - black_space) * 2
 
 def Evaluate_Mobility (board: Board, white_piece_map: dict, black_piece_map: dict) -> float:
-    knight_dirs = [(1, 2), (2, 1), (-1, 2), (-2, 1), (1, -2), (2, -1), (-1, -2), (-2, -1)]
-    bishop_dirs = [(1, 1), (1, -1), (-1, 1), (-1, -1)]
-    rook_dirs = [(1, 0), (-1, 0), (0, 1), (0, -1)]
     weights = {'N': 4, 'B': 3, 'R': 2, 'Q': 1}
 
     white_mobility = 0
@@ -761,7 +890,7 @@ def Evaluate_Mobility (board: Board, white_piece_map: dict, black_piece_map: dic
             for row, col in piece_map[p]:
                 if p == "N":
                     count = 0
-                    for dr, dc in knight_dirs:
+                    for dr, dc in KNIGHT_DIRS:
                         r, c = row + dr, col + dc
                         if 0 <= r < 8 and 0 <= c < 8:
                             target = board.board[r][c]
@@ -772,9 +901,9 @@ def Evaluate_Mobility (board: Board, white_piece_map: dict, black_piece_map: dic
 
                 directions = []
                 if p in ("B", "Q"):
-                    directions.extend(bishop_dirs)
+                    directions.extend(BISHOP_DIRS)
                 if p in ("R", "Q"):
-                    directions.extend(rook_dirs)
+                    directions.extend(ROOK_DIRS)
 
                 reachable = 0
                 for dr, dc in directions:
@@ -931,11 +1060,14 @@ def Evaluate_Skewers(board: Board) -> float:
 
 
 def Terminal_Score(board: Board, ply: int) -> float:
-    if not board.Is_King_In_Check(board.white_to_move):
+    result, reason = board.Get_Game_Result(legal_moves=[])
+    if reason != "checkmate":
         return 0.0
     return -(MATE_SCORE - ply)
 
 def Evaluate_Node(board: Board) -> float:
+    if board.Is_Threefold_Repetition() or board.Is_Fifty_Move_Rule():
+        return 0.0
     score = Evaluate_Position(board)
     return score if board.white_to_move else -score
 
@@ -954,6 +1086,12 @@ def Negamax(board: Board, depth: int, alpha: float, beta: float, ply: int = 0) -
         return 0.0
 
     alpha_orig = alpha
+    key = board.Hash_Board()
+    entry, alpha, beta, tt_score = _Probe_TT(key, depth, alpha, beta, ply)
+    if tt_score is not None:
+        t1 = time.perf_counter()
+        ctx.minimax_time += t1 - t0
+        return tt_score
 
     if depth <= 0:
         score = Quiescence_Search(board, alpha, beta, ply)
@@ -961,46 +1099,21 @@ def Negamax(board: Board, depth: int, alpha: float, beta: float, ply: int = 0) -
         ctx.minimax_time += t1 - t0
         return score if score is not None else 0.0
 
+    node_in_check = board.Is_King_In_Check(board.white_to_move)
+    if node_in_check and ply < 15:
+        depth += 1
+
     legal_moves = board.Generate_Legal_Moves()
     if not legal_moves:
         score = Terminal_Score(board, ply)
         t1 = time.perf_counter()
         ctx.minimax_time += t1 - t0
         return score
-        
-    Order_Moves(board, legal_moves, depth)
 
-    key = board.Hash_Board()
-    if key in ctx.transposition_table:
-        entry = ctx.transposition_table[key]
-        ctx.transposition_hits += 1
+    tt_move = entry.move if entry is not None else None
+    Order_Moves(board, legal_moves, depth, tt_move=tt_move)
 
-        if entry.move in legal_moves:
-            legal_moves.remove(entry.move)
-            legal_moves.insert(0, entry.move)
-
-        if entry.depth >= depth:
-            if entry.flag == 'EXACT':
-                ctx.transposition_cutoffs += 1
-                t1 = time.perf_counter()
-                ctx.minimax_time += t1 - t0
-                return entry.score
-            elif entry.flag == 'LOWER':
-                alpha = max(alpha, entry.score)
-            elif entry.flag == 'UPPER':
-                beta = min(beta, entry.score)
-            if alpha >= beta:
-                ctx.transposition_cutoffs += 1
-                t1 = time.perf_counter()
-                ctx.minimax_time += t1 - t0
-                return entry.score
-
-    node_in_check = board.Is_King_In_Check(board.white_to_move)
-
-    if node_in_check and ply < 15:
-        depth += 1
-
-    if ENABLE_NULL_MOVE_PRUNING and depth >= 3 and not node_in_check and Has_Non_Pawn_Material(board, board.white_to_move):
+    if ENABLE_NULL_MOVE_PRUNING and depth >= 4 and not node_in_check and Has_Non_Pawn_Material(board, board.white_to_move):
         reduction = 2
         board.Make_Null_Move()
         null_score = -Negamax(board, depth - 1 - reduction, -beta, -beta + 1, ply + 1)
@@ -1022,13 +1135,21 @@ def Negamax(board: Board, depth: int, alpha: float, beta: float, ply: int = 0) -
         is_quiet = not move.piece_captured and not move.is_pawn_promotion
         gives_check = move.gives_check
 
-        if ENABLE_LATE_MOVE_PRUNING and depth >= 4 and move_index >= 4 and is_quiet and not node_in_check and not gives_check:
+        if (
+            ENABLE_LATE_MOVE_PRUNING
+            and depth >= 5
+            and move_index >= 8
+            and is_quiet
+            and not node_in_check
+            and not gives_check
+            and alpha > -MATE_TT_THRESHOLD
+            and best_score > -MATE_TT_THRESHOLD
+        ):
             board.Undo_Move()
             continue
 
         lmr_reduction = 0
-        if is_quiet and move_index >= 3 and depth >= 4 and not node_in_check and not gives_check:
-            import math
+        if is_quiet and move_index >= 4 and depth >= 5 and not node_in_check and not gives_check:
             base_reduction = int((math.log(depth) * math.log(move_index + 1)) / 2)
             lmr_reduction = max(1, min(depth - 2, base_reduction))
 
@@ -1075,7 +1196,7 @@ def Negamax(board: Board, depth: int, alpha: float, beta: float, ply: int = 0) -
     else:
         flag = 'EXACT'
         
-    _Store_TT_Entry(key, depth, best_score, flag, best_move)
+    _Store_TT_Entry(key, depth, best_score, flag, best_move, ply)
 
     t1 = time.perf_counter()
     ctx.minimax_time += t1 - t0
@@ -1089,6 +1210,10 @@ def Quiescence_Search(board: Board, alpha: float, beta: float, ply: int) -> floa
     if ply > ctx.max_seldepth:
         ctx.max_seldepth = ply
     t0 = time.perf_counter()
+    if board.Is_Threefold_Repetition() or board.Is_Fifty_Move_Rule():
+        t1 = time.perf_counter()
+        ctx.quiescence_time += t1 - t0
+        return 0.0
 
     qratio = _Current_QRatio()
     qnode_budget = min(50000, max(6000, ctx.nodes_searched * 4))
@@ -1129,9 +1254,6 @@ def Quiescence_Search(board: Board, alpha: float, beta: float, ply: int) -> floa
 
     Order_Quiescence_Moves(board, noisy_moves)
 
-    # Delta Pruning values
-    piece_values = {'P': 100, 'N': 320, 'B': 330, 'R': 500, 'Q': 900, 'K': 0,
-                    'p': 100, 'n': 320, 'b': 330, 'r': 500, 'q': 900, 'k': 0}
     if qratio > 2.5:
         delta_margin = 60
     elif qratio > 1.7:
@@ -1141,10 +1263,11 @@ def Quiescence_Search(board: Board, alpha: float, beta: float, ply: int) -> floa
 
     for move in noisy_moves:
         # Delta pruning: skip low-value captures that cannot raise alpha.
-        if not in_check and move.piece_captured:
-            captured_val = piece_values.get(move.piece_captured, 0)
+        if not in_check:
+            captured_val = ABS_PIECE_VALUES.get(move.piece_captured or "", 0)
+            promotion_gain = 775 if move.is_pawn_promotion else 0
             # Keep tactical headroom in mate races and for promotions.
-            if alpha < (MATE_SCORE - 500) and stand_pat + captured_val + delta_margin < alpha and not move.is_pawn_promotion:
+            if alpha < (MATE_SCORE - 500) and stand_pat + captured_val + promotion_gain + delta_margin < alpha:
                 continue
 
         if not board.Make_Move(move):
@@ -1251,33 +1374,30 @@ def Static_Exchange_Evaluation (board: Board, move: Move) -> int:
 
 def Score_Move (board: Board, move: Move, depth: int = 0) -> int:
     "mvv-lva most valuable victim - least valuable attacker"
-    piece_values = {
-        'P':100, 'N':300, 'B':300, 'R':500, 'Q':900, 'K':10000,
-        'p':100, 'n':300, 'b':300, 'r':500, 'q':900, 'k':10000
-    }
-
     victim = move.piece_captured
     attacker = move.piece_moved
 
     if move.is_pawn_promotion:
-        return 20000
+        return 20000 + CHECK_MOVE_BONUS if move.gives_check else 20000
     
     if victim:
-        victim_value = piece_values.get(victim, 0)
-        attacker_value = piece_values.get(attacker, 1)
+        victim_value = ABS_PIECE_VALUES.get(victim, 0)
+        attacker_value = ABS_PIECE_VALUES.get(attacker, 1)
         trade_delta = victim_value - attacker_value
         capture_score = 10000 + 12 * victim_value - 2 * attacker_value
         capture_score += 1500 if trade_delta >= 0 else -1500
         if SEE_ENABLED:
             capture_score += Static_Exchange_Evaluation(board, move)
+        if move.gives_check:
+            capture_score += CHECK_MOVE_BONUS
         return capture_score
     
     if depth in ctx.killer_moves and move in ctx.killer_moves[depth]:
         index = ctx.killer_moves[depth].index(move)
-        return 8500 - (index * 300)
+        return 8500 - (index * 300) + (CHECK_MOVE_BONUS if move.gives_check else 0)
     
     key = (move.start, move.end)
-    return ctx.history_heuristic.get(key, 0)
+    return ctx.history_heuristic.get(key, 0) + (CHECK_MOVE_BONUS if move.gives_check else 0)
 
 
 def Find_Best_Move(
@@ -1294,7 +1414,7 @@ def Find_Best_Move(
     ctx.search_deadline = (start_time + time_limit) if time_limit else None
 
     guess = Evaluate_Node(board)
-    window_size = 50
+    window_size = 60
 
     completed_best_move = None
     completed_score = guess
@@ -1308,13 +1428,61 @@ def Find_Best_Move(
             return True
         return False
 
+    def search_root_window(depth: int, alpha: float, beta: float) -> tuple[Move | None, float, bool]:
+        legal_moves = board.Generate_Legal_Moves()
+        if not legal_moves:
+            return None, Terminal_Score(board, 0), True
+
+        root_entry = ctx.transposition_table.get(board.Hash_Board())
+        tt_move = root_entry.move if root_entry is not None else None
+        Order_Moves(board, legal_moves, depth, tt_move=tt_move)
+        _Prioritize_Root_Move(legal_moves, ctx.root_pv_move)
+
+        best_score = float('-inf')
+        best_move = None
+
+        for move_index, move in enumerate(legal_moves):
+            if root_should_stop():
+                return None, best_score, False
+
+            if not board.Make_Move(move):
+                continue
+
+            if move_index == 0 or depth < 3:
+                score = -Negamax(board, depth - 1, -beta, -alpha, 1)
+            else:
+                score = -Negamax(board, depth - 1, -alpha - 1, -alpha, 1)
+                if alpha < score < beta:
+                    score = -Negamax(board, depth - 1, -beta, -alpha, 1)
+            board.Undo_Move()
+
+            if root_should_stop():
+                return None, best_score, False
+
+            if score > best_score:
+                best_score = score
+                best_move = move
+
+            if score > alpha:
+                alpha = score
+
+            if alpha >= beta:
+                break
+
+        return best_move, best_score, True
+
     for current_depth in range(1, max_depth + 1):
         if root_should_stop():
             break
 
+        if current_depth == 1:
+            alpha = float('-inf')
+            beta = float('inf')
+        else:
+            alpha = guess - window_size
+            beta = guess + window_size
+
         window = window_size
-        alpha = guess - window
-        beta = guess + window
         iteration_best_move = None
         iteration_best_score = float('-inf')
         iteration_complete = False
@@ -1323,62 +1491,43 @@ def Find_Best_Move(
             if root_should_stop():
                 break
 
-            legal_moves = board.Generate_Legal_Moves()
-            if not legal_moves:
+            best_move, best_score, completed = search_root_window(current_depth, alpha, beta)
+            if not completed:
+                break
+
+            if best_move is None:
                 elapsed = time.perf_counter() - start_time
                 ctx.total_time_taken = elapsed
                 ctx.last_search_depth = 0
-                ctx.last_root_score = Terminal_Score(board, 0)
+                ctx.last_root_score = best_score
                 ctx.last_pv = []
                 ctx.search_deadline = None
                 ctx.stop_checker = None
                 return None
 
-            Order_Moves(board, legal_moves, current_depth)
-            _Prioritize_Root_Move(legal_moves, ctx.root_pv_move)
-
-            best_score = float('-inf')
-            best_move = None
-            aborted = False
-
-            for move in legal_moves:
-                if root_should_stop():
-                    aborted = True
-                    break
-
-                if not board.Make_Move(move):
-                    continue
-
-                score = -Negamax(board, current_depth - 1, -beta, -alpha, 1)
-                board.Undo_Move()
-
-                if root_should_stop():
-                    aborted = True
-                    break
-
-                if score > best_score:
-                    best_score = score
-                    best_move = move
-
-                if score > alpha:
-                    alpha = score
-
-            if aborted or best_move is None:
-                break
-
             iteration_best_move = best_move
             iteration_best_score = best_score
 
-            if best_score <= guess - window:
+            if best_score <= alpha:
                 ctx.aspiration_fail_lows += 1
                 ctx.aspiration_window_expansions += 1
-                alpha = float('-inf')
                 window *= 2
-            elif best_score >= guess + window:
+                if window >= 4000:
+                    alpha = float('-inf')
+                    beta = float('inf')
+                else:
+                    alpha = guess - window
+                    beta = guess + window
+            elif best_score >= beta:
                 ctx.aspiration_fail_highs += 1
                 ctx.aspiration_window_expansions += 1
-                beta = float('inf')
                 window *= 2
+                if window >= 4000:
+                    alpha = float('-inf')
+                    beta = float('inf')
+                else:
+                    alpha = guess - window
+                    beta = guess + window
             else:
                 guess = best_score
                 iteration_complete = True
@@ -1400,6 +1549,7 @@ def Find_Best_Move(
         ctx.last_root_score = completed_score
         ctx.last_pv = completed_pv
         ctx.last_best_move_uci = completed_best_move.To_UCI() if completed_best_move else "0000"
+        window_size = 50 if abs(completed_score) < MATE_TT_THRESHOLD else 200
 
         if info_callback:
             elapsed = time.perf_counter() - start_time
@@ -1427,6 +1577,7 @@ def Toggle_Detailed_Log(enabled: bool):
 
 def Clear_Transposition_Table():
     ctx.transposition_table.clear()
+    ctx.eval_cache.clear()
 
 
 def _Print_Search_Stats(board: Board, best_move: Move | None):

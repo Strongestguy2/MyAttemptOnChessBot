@@ -1,10 +1,13 @@
 import time
 import random
+import tkinter as tk
+from tkinter import TclError, messagebox
 from dataclasses import dataclass
 from typing import List
 
 import Engine
 from Board import Board
+from ChessUI import ChessUI
 
 
 @dataclass
@@ -255,6 +258,118 @@ def run_consistency_suite(seed: int = 42, steps: int = 300) -> tuple[bool, str]:
     return all_ok, "\n".join(lines)
 
 
+def run_terminal_state_suite() -> tuple[bool, str]:
+    lines = ["=== Terminal State Suite ==="]
+    all_ok = True
+
+    cases = [
+        ("checkmate", "7k/6Q1/6K1/8/8/8/8/8 b - - 0 1", "white", "checkmate"),
+        ("stalemate", "7k/5Q2/6K1/8/8/8/8/8 b - - 0 1", "draw", "stalemate"),
+        ("fifty-move", "8/8/8/8/8/8/2k5/2K5 w - - 100 1", "draw", "fifty_move_rule"),
+    ]
+
+    for name, fen, expected_result, expected_reason in cases:
+        board = Board()
+        board.Load_FEN(fen)
+        result, reason = board.Get_Game_Result()
+        ok = result == expected_result and reason == expected_reason
+        all_ok = all_ok and ok
+        lines.append(
+            f"[{name}] {'PASS' if ok else 'FAIL'} result={result} reason={reason} expected=({expected_result}, {expected_reason})"
+        )
+
+    repetition_board = Board()
+    repetition_board.position_history[repetition_board.Hash_Board()] = 3
+    result, reason = repetition_board.Get_Game_Result()
+    repetition_ok = result == "draw" and reason == "threefold_repetition"
+    all_ok = all_ok and repetition_ok
+    lines.append(
+        f"[threefold] {'PASS' if repetition_ok else 'FAIL'} result={result} reason={reason} expected=(draw, threefold_repetition)"
+    )
+
+    return all_ok, "\n".join(lines)
+
+
+def run_tt_mate_suite() -> tuple[bool, str]:
+    lines = ["=== TT Mate Suite ==="]
+    all_ok = True
+
+    cases = [
+        (Engine.MATE_SCORE - 3, 1),
+        (Engine.MATE_SCORE - 7, 4),
+        (-(Engine.MATE_SCORE - 5), 2),
+        (-(Engine.MATE_SCORE - 11), 6),
+        (42, 3),
+    ]
+
+    for score, ply in cases:
+        stored = Engine._Score_To_TT(score, ply)
+        restored = Engine._Score_From_TT(stored, ply)
+        ok = restored == score
+        all_ok = all_ok and ok
+        lines.append(
+            f"[score={score} ply={ply}] {'PASS' if ok else 'FAIL'} stored={stored} restored={restored}"
+        )
+
+    return all_ok, "\n".join(lines)
+
+
+def run_ui_state_suite() -> tuple[bool, str]:
+    lines = ["=== UI State Suite ==="]
+
+    try:
+        root = tk.Tk()
+        root.withdraw()
+    except TclError as exc:
+        lines.append(f"[ui-init] SKIP {exc}")
+        return True, "\n".join(lines)
+
+    original_showinfo = messagebox.showinfo
+    shown_messages = []
+
+    def fake_showinfo(title, text):
+        shown_messages.append((title, text))
+
+    messagebox.showinfo = fake_showinfo
+
+    try:
+        ui = ChessUI(root)
+        ui.root.after_cancel(ui.root.after(1, lambda: None))
+
+        mate_fen = "7k/6Q1/6K1/8/8/8/8/8 b - - 0 1"
+        ui.board.Load_FEN(mate_fen)
+        ui.Refresh_Eval_Cache()
+        ui.Check_Endgame()
+        ui.Check_Endgame()
+        popup_ok = len(shown_messages) == 1 and ui.game_over
+        lines.append(f"[single-popup] {'PASS' if popup_ok else 'FAIL'} popups={len(shown_messages)} game_over={ui.game_over}")
+
+        ui.Restart()
+        restart_ok = (not ui.game_over) and ui.game_result_latch is None
+        ui.board.Load_FEN(mate_fen)
+        ui.Refresh_Eval_Cache()
+        ui.Check_Endgame()
+        restart_latch_ok = len(shown_messages) == 2
+        restart_ok = restart_ok and restart_latch_ok
+        lines.append(f"[restart-reset] {'PASS' if restart_ok else 'FAIL'} popups={len(shown_messages)} latch={ui.game_result_latch is not None}")
+
+        ui.Restart()
+        legal = ui.board.Generate_Legal_Moves()
+        if legal:
+            ui.board.Make_Move(legal[0])
+        ui.game_over = True
+        ui.game_result_latch = ("latched", "draw", "stalemate")
+        ui.Undo()
+        undo_ok = (not ui.game_over) and ui.game_result_latch is None
+        lines.append(f"[undo-reset] {'PASS' if undo_ok else 'FAIL'}")
+
+        all_ok = popup_ok and restart_ok and undo_ok
+        return all_ok, "\n".join(lines)
+    finally:
+        messagebox.showinfo = original_showinfo
+        root.destroy()
+
+
 def run_search_stability_suite(depth: int = 4, repeats: int = 2) -> tuple[bool, str]:
     positions = [
         ("startpos", Board.START_FEN),
@@ -334,6 +449,15 @@ def run_full_regression(depth: int = 4) -> bool:
 
         consistency_ok, consistency_report = run_consistency_suite()
         results.append((consistency_ok, consistency_report))
+
+        terminal_ok, terminal_report = run_terminal_state_suite()
+        results.append((terminal_ok, terminal_report))
+
+        tt_ok, tt_report = run_tt_mate_suite()
+        results.append((tt_ok, tt_report))
+
+        ui_ok, ui_report = run_ui_state_suite()
+        results.append((ui_ok, ui_report))
 
         stability_ok, stability_report = run_search_stability_suite(depth=max(3, depth), repeats=2)
         results.append((stability_ok, stability_report))
