@@ -192,6 +192,7 @@ def run_benchmark(depth: int = 4) -> tuple[bool, str]:
     positions = [
         ("startpos", Board.START_FEN),
         ("open-center", "r1bqkbnr/pppp1ppp/2n5/4p3/2B1P3/5N2/PPPP1PPP/RNBQK2R b KQkq - 2 3"),
+        ("sharp-center", "r1bqkb1r/pppp1ppp/2n2n2/1B2p3/4P3/2N2N2/PPPP1PPP/R1BQK2R b KQkq - 1 4"),
         ("quiet-endgame", "8/2k5/3p4/3P4/8/2K5/8/8 w - - 0 1"),
     ]
 
@@ -217,7 +218,15 @@ def run_benchmark(depth: int = 4) -> tuple[bool, str]:
             f"nodes={stats['nodes']} qnodes={stats['qnodes']} total_nodes={stats['total_nodes']} "
             f"time={elapsed:.3f}s nps={stats['nps']} seldepth={stats['seldepth']} "
             f"tt_hit_rate={stats['tt_hit_rate']:.3f} tt_cutoff_rate={stats['tt_cutoff_rate']:.3f} "
-            f"qratio={stats['qratio']:.2f} nmp={stats['nmp_used']} lmr={stats['lmr_count']}"
+            f"qratio={stats['qratio']:.2f} nmp={stats['nmp_used']} "
+            f"lmr={stats['lmr_count']} lmr_candidates={stats['lmr_candidates']} "
+            f"lmr_applied={stats['lmr_applied']} lmr_researches={stats['lmr_researches']} "
+            f"eval_calls={stats['eval_calls']} static_eval_calls={stats['static_eval_calls']} "
+            f"full_eval_calls={stats['full_eval_calls']} qsearch_eval_calls={stats['qsearch_eval_calls']} "
+            f"main_eval_calls={stats['main_eval_calls']} avg_eval_us={stats['avg_eval_time_us']:.1f} "
+            f"q_noisy_considered={stats['qsearch_noisy_considered']} "
+            f"q_noisy_accepted={stats['qsearch_noisy_accepted']} "
+            f"q_noisy_rejected={stats['qsearch_noisy_rejected']}"
         )
 
     return all_ok, "\n".join(lines)
@@ -449,6 +458,59 @@ def run_ui_state_suite() -> tuple[bool, str]:
         root.destroy()
 
 
+def run_search_efficiency_suite(depth: int = 4) -> tuple[bool, str]:
+    positions = [
+        ("qsearch-filter", "r3k2r/ppp2ppp/2n5/3q4/3P4/2N1Q3/PPP2PPP/R3K2R w KQkq - 0 1"),
+        ("lmr-middlegame", "r1bqkb1r/pppp1ppp/2n2n2/1B2p3/4P3/2N2N2/PPPP1PPP/R1BQK2R b KQkq - 1 4"),
+        ("quiet-tension", "r2qk2r/pp2bppp/2n2n2/2bp4/2B5/2NP1NP1/PPP2PBP/R1BQ1RK1 w kq - 2 9"),
+    ]
+
+    Engine.Toggle_Logging(False)
+    lines = ["=== Search Efficiency Suite ===", f"depth={depth}"]
+    all_ok = True
+    saw_lmr = False
+    saw_qreject = False
+
+    for name, fen in positions:
+        board = Board()
+        board.Load_FEN(fen)
+        Engine.Clear_Transposition_Table()
+        best = Engine.Find_Best_Move(board, depth)
+        stats = Engine.Get_Search_Stats()
+
+        if best is None:
+            all_ok = False
+            lines.append(f"[{name}] FAIL bestmove=none")
+            continue
+
+        if stats["lmr_applied"] > 0:
+            saw_lmr = True
+        if stats["qsearch_noisy_rejected"] > 0:
+            saw_qreject = True
+
+        lines.append(
+            f"[{name}] best={move_to_uci(best)} qratio={stats['qratio']:.2f} "
+            f"lmr_candidates={stats['lmr_candidates']} lmr_applied={stats['lmr_applied']} "
+            f"lmr_researches={stats['lmr_researches']} q_noisy_rejected={stats['qsearch_noisy_rejected']} "
+            f"q_noisy_accepted={stats['qsearch_noisy_accepted']} eval_calls={stats['eval_calls']} "
+            f"avg_eval_us={stats['avg_eval_time_us']:.1f}"
+        )
+
+    if not saw_lmr:
+        all_ok = False
+        lines.append("[lmr-activation] FAIL no benchmark position triggered LMR")
+    else:
+        lines.append("[lmr-activation] PASS")
+
+    if not saw_qreject:
+        all_ok = False
+        lines.append("[qsearch-filter] FAIL no benchmark position rejected noisy captures")
+    else:
+        lines.append("[qsearch-filter] PASS")
+
+    return all_ok, "\n".join(lines)
+
+
 def run_search_stability_suite(depth: int = 4, repeats: int = 2) -> tuple[bool, str]:
     positions = [
         ("startpos", Board.START_FEN),
@@ -580,6 +642,9 @@ def run_full_regression(depth: int = 4) -> bool:
 
         ui_ok, ui_report = run_ui_state_suite()
         results.append((ui_ok, ui_report))
+
+        efficiency_ok, efficiency_report = run_search_efficiency_suite(depth=max(4, depth))
+        results.append((efficiency_ok, efficiency_report))
 
         stability_ok, stability_report = run_search_stability_suite(depth=max(3, depth), repeats=2)
         results.append((stability_ok, stability_report))

@@ -1,5 +1,6 @@
 from Board import Board
 from Move import Move
+from EvalBackend import FeatureVector, StubNNUEBackend, extract_features_from_board
 from tables import PAWN_TABLE, KNIGHT_TABLE, BISHOP_TABLE, ROOK_TABLE, QUEEN_TABLE, KING_MID_TABLE, KING_END_TABLE
 import math
 import time
@@ -29,10 +30,21 @@ class EngineSearchContext:
         self.transposition_cutoffs = 0
         self.nmp_used = 0
         self.lmr_count = 0
+        self.lmr_candidates = 0
+        self.lmr_applied = 0
+        self.lmr_researches = 0
         self.minimax_time = 0.0
         self.quiescence_time = 0.0
         self.see_time = 0.0
         self.evaluate_position_time = 0.0
+        self.total_eval_calls = 0
+        self.static_eval_calls = 0
+        self.full_eval_calls = 0
+        self.qsearch_eval_calls = 0
+        self.main_search_eval_calls = 0
+        self.qsearch_noisy_accepted = 0
+        self.qsearch_noisy_rejected = 0
+        self.qsearch_noisy_considered = 0
         self.last_search_depth = 0
         self.last_root_score = 0.0
         self.last_pv = []
@@ -60,6 +72,7 @@ def __getattr__(name):
         'TRANSPOSITION_CUTOFFS': 'transposition_cutoffs',
         'NMP_USED': 'nmp_used',
         'LMR_COUNT': 'lmr_count',
+        'TOTAL_EVAL_CALLS': 'total_eval_calls',
         'MINIMAX_TIME': 'minimax_time',
         'QUIESCENCE_TIME': 'quiescence_time',
         'SEE_TIME': 'see_time',
@@ -110,6 +123,7 @@ EXTENDED_CENTER_SQUARES = (
     (5, 2), (5, 3), (5, 4), (5, 5),
 )
 EXTENDED_CENTER_SET = frozenset(EXTENDED_CENTER_SQUARES)
+NNUE_BACKEND = StubNNUEBackend()
 
 def Reset_Search_Stats():
 
@@ -118,6 +132,9 @@ def Reset_Search_Stats():
     ctx.nodes_searched = 0
     ctx.quiescence_nodes = 0
     ctx.lmr_count = 0
+    ctx.lmr_candidates = 0
+    ctx.lmr_applied = 0
+    ctx.lmr_researches = 0
     ctx.nmp_used = 0
     ctx.killer_moves = {}
     ctx.history_heuristic = {}
@@ -125,6 +142,14 @@ def Reset_Search_Stats():
     ctx.quiescence_time = 0.0
     ctx.see_time = 0.0
     ctx.evaluate_position_time = 0.0
+    ctx.total_eval_calls = 0
+    ctx.static_eval_calls = 0
+    ctx.full_eval_calls = 0
+    ctx.qsearch_eval_calls = 0
+    ctx.main_search_eval_calls = 0
+    ctx.qsearch_noisy_accepted = 0
+    ctx.qsearch_noisy_rejected = 0
+    ctx.qsearch_noisy_considered = 0
     ctx.last_search_depth = 0
     ctx.last_root_score = 0.0
     ctx.last_pv = []
@@ -339,6 +364,7 @@ def Get_Search_Stats() -> dict:
     qratio = _Current_QRatio()
     tt_hit_rate = (ctx.transposition_hits / max(1, total_nodes))
     tt_cutoff_rate = (ctx.transposition_cutoffs / max(1, ctx.transposition_hits))
+    avg_eval_time_us = (ctx.evaluate_position_time * 1_000_000.0 / max(1, ctx.total_eval_calls))
     return {
         "depth": ctx.last_search_depth,
         "seldepth": max(ctx.max_seldepth, ctx.last_search_depth),
@@ -359,10 +385,37 @@ def Get_Search_Stats() -> dict:
         "qratio": qratio,
         "nmp_used": ctx.nmp_used,
         "lmr_count": ctx.lmr_count,
+        "lmr_candidates": ctx.lmr_candidates,
+        "lmr_applied": ctx.lmr_applied,
+        "lmr_researches": ctx.lmr_researches,
+        "eval_calls": ctx.total_eval_calls,
+        "static_eval_calls": ctx.static_eval_calls,
+        "full_eval_calls": ctx.full_eval_calls,
+        "qsearch_eval_calls": ctx.qsearch_eval_calls,
+        "main_eval_calls": ctx.main_search_eval_calls,
+        "avg_eval_time_us": avg_eval_time_us,
+        "qsearch_noisy_considered": ctx.qsearch_noisy_considered,
+        "qsearch_noisy_accepted": ctx.qsearch_noisy_accepted,
+        "qsearch_noisy_rejected": ctx.qsearch_noisy_rejected,
         "asp_fail_low": ctx.aspiration_fail_lows,
         "asp_fail_high": ctx.aspiration_fail_highs,
         "asp_expands": ctx.aspiration_window_expansions,
     }
+
+
+def _Record_Eval_Call(is_static: bool, caller: str, elapsed: float):
+    ctx.total_eval_calls += 1
+    if is_static:
+        ctx.static_eval_calls += 1
+    else:
+        ctx.full_eval_calls += 1
+
+    if caller == "qsearch":
+        ctx.qsearch_eval_calls += 1
+    else:
+        ctx.main_search_eval_calls += 1
+
+    ctx.evaluate_position_time += elapsed
 
 
 def Estimate_Auto_Depth(board: Board, min_depth: int = 3, max_depth: int = 8, last_time: float = 0.0, last_nodes: int = 0) -> int:
@@ -439,6 +492,58 @@ def _Quiescence_Delta_Margin(move: Move, qratio: float) -> int:
     return 30 if qratio > 1.7 else 50
 
 
+def _Approx_Capture_Risk(board: Board, move: Move) -> tuple[bool, bool, bool]:
+    if move.is_pawn_promotion:
+        return False, True, False
+
+    friendly_is_white = board.white_to_move
+    defended_by_enemy = board._Is_Square_Attacked(move.end, not friendly_is_white)
+    supported_by_friendly = board._Is_Square_Attacked(move.end, friendly_is_white)
+    victim_value = ABS_PIECE_VALUES.get(move.piece_captured or "", 0)
+    attacker_value = ABS_PIECE_VALUES.get(move.piece_moved or "", 0)
+    risky = defended_by_enemy and (not supported_by_friendly) and attacker_value > victim_value
+    return defended_by_enemy, supported_by_friendly, risky
+
+
+def _QCapture_Order_Score(board: Board, move: Move) -> int:
+    score = _Capture_Order_Score(move)
+    defended, supported, risky = _Approx_Capture_Risk(board, move)
+    if risky:
+        score -= 2400
+    elif defended and not supported:
+        score -= 900
+    elif supported:
+        score += 250
+    return score
+
+
+def _Should_Search_QCapture(board: Board, move: Move, qratio: float) -> tuple[bool, bool]:
+    if move.is_pawn_promotion:
+        return True, False
+
+    tier = Capture_Quality_Tier(move)
+    defended, supported, risky = _Approx_Capture_Risk(board, move)
+    attacker_value = ABS_PIECE_VALUES.get(move.piece_moved or "", 0)
+    victim_value = ABS_PIECE_VALUES.get(move.piece_captured or "", 0)
+
+    if tier == 0:
+        return False, risky or defended
+    if tier == 1 and risky:
+        return False, True
+    if tier == 1 and defended and not supported and attacker_value >= victim_value and qratio > 0.35:
+        return False, True
+    if tier == 1 and defended and not supported and qratio > 0.8:
+        return False, True
+    return True, risky
+
+
+def _Is_Promising_Quiet(move: Move, depth: int) -> bool:
+    if depth in ctx.killer_moves and move in ctx.killer_moves[depth]:
+        return True
+    history_score = ctx.history_heuristic.get((move.start, move.end), 0)
+    return history_score >= max(100, depth * depth * 4)
+
+
 def Order_Moves(board: Board, moves: list, depth: int, tt_move: Move | None = None):
     scored_moves = []
     for move in moves:
@@ -451,7 +556,7 @@ def Order_Moves(board: Board, moves: list, depth: int, tt_move: Move | None = No
     moves[:] = [move for _, move in scored_moves]
 
 def Order_Quiescence_Moves(board: Board, moves: list):
-    moves.sort(key=_Capture_Order_Score, reverse=True)
+    moves.sort(key=lambda move: _QCapture_Order_Score(board, move), reverse=True)
 
 def Move_Gives_Check(board: Board, move: Move, cache: dict) -> bool:
     cache_key = hash(move)
@@ -477,6 +582,22 @@ def _Store_Eval_Cache(key: int, score: float):
     if len(ctx.eval_cache) >= MAX_EVAL_CACHE_SIZE:
         ctx.eval_cache.pop(next(iter(ctx.eval_cache)))
     ctx.eval_cache[key] = score
+
+
+def extract_features(board: Board) -> FeatureVector:
+    return extract_features_from_board(board)
+
+
+def Load_NNUE_Backend(weights_path: str | None = None):
+    NNUE_BACKEND.load(weights_path)
+
+
+def Set_Eval_Mode(mode: str):
+    global EVAL_MODE
+    normalized = str(mode).strip().lower()
+    if normalized not in {"classical", "nnue"}:
+        raise ValueError(f"Unsupported eval mode: {mode}")
+    EVAL_MODE = normalized
 
 
 def Evaluate_Endgame_King_Activity(board: Board, phase: int, white_piece_map: dict, black_piece_map: dict) -> float:
@@ -528,11 +649,9 @@ def Evaluate_Mop_Up(board: Board, phase: int, white_material: int, black_materia
 
 
 def evaluate_classical(board: Board) -> float:
-    t0 = time.perf_counter()
     key = board.Hash_Board()
     cached_score = ctx.eval_cache.get(key)
     if cached_score is not None:
-        ctx.evaluate_position_time += time.perf_counter() - t0
         return cached_score
 
     board_rows = board.board
@@ -738,25 +857,34 @@ def evaluate_classical(board: Board) -> float:
     phase = max(0, min(24, phase))
     score = (mg_score * phase + eg_score * (24 - phase)) / 24
     _Store_Eval_Cache(key, score)
-    ctx.evaluate_position_time += time.perf_counter() - t0
     return score
 
 
 def evaluate_nnue(board: Board) -> float:
-    # Placeholder backend until a trained NNUE evaluator exists.
-    return evaluate_classical(board)
+    if not NNUE_BACKEND.is_ready():
+        NNUE_BACKEND.load(None)
+    features = extract_features(board)
+    return NNUE_BACKEND.evaluate(features)
 
 
-def static_eval(board: Board) -> float:
+def static_eval(board: Board, caller: str = "main") -> float:
+    t0 = time.perf_counter()
     if EVAL_MODE == "nnue":
-        return evaluate_nnue(board)
-    return evaluate_classical(board)
+        score = evaluate_nnue(board)
+    else:
+        score = evaluate_classical(board)
+    _Record_Eval_Call(is_static=True, caller=caller, elapsed=time.perf_counter() - t0)
+    return score
 
 
-def full_eval(board: Board) -> float:
+def full_eval(board: Board, caller: str = "main") -> float:
+    t0 = time.perf_counter()
     if EVAL_MODE == "nnue":
-        return evaluate_nnue(board)
-    return evaluate_classical(board)
+        score = evaluate_nnue(board)
+    else:
+        score = evaluate_classical(board)
+    _Record_Eval_Call(is_static=False, caller=caller, elapsed=time.perf_counter() - t0)
+    return score
 
 
 def Evaluate_Position(board: Board) -> float:
@@ -1158,10 +1286,10 @@ def Terminal_Score(board: Board, ply: int) -> float:
         return 0.0
     return -(MATE_SCORE - ply)
 
-def Evaluate_Node(board: Board) -> float:
+def Evaluate_Node(board: Board, caller: str = "main") -> float:
     if board.Is_Threefold_Repetition() or board.Is_Fifty_Move_Rule():
         return 0.0
-    score = full_eval(board)
+    score = full_eval(board, caller=caller)
     return score if board.white_to_move else -score
 
 def Negamax(board: Board, depth: int, alpha: float, beta: float, ply: int = 0) -> float:
@@ -1242,18 +1370,29 @@ def Negamax(board: Board, depth: int, alpha: float, beta: float, ply: int = 0) -
             continue
 
         lmr_reduction = 0
-        if is_quiet and move_index >= 4 and depth >= 5 and not node_in_check and not gives_check:
-            base_reduction = int((math.log(depth) * math.log(move_index + 1)) / 2)
-            lmr_reduction = max(1, min(depth - 2, base_reduction))
+        lmr_candidate = (
+            is_quiet
+            and depth >= 3
+            and move_index >= 2
+            and not node_in_check
+            and not gives_check
+        )
+        if lmr_candidate:
+            ctx.lmr_candidates += 1
+            if not _Is_Promising_Quiet(move, depth):
+                base_reduction = 1 + int((math.log(depth) * math.log(move_index + 1)) / 3)
+                lmr_reduction = max(1, min(depth - 2, base_reduction))
 
-        if move_index == 0 or depth < 4:
+        if move_index == 0 or depth < 3:
             score = -Negamax(board, depth - 1, -beta, -alpha, ply + 1)
         else:
             if lmr_reduction > 0:
                 ctx.lmr_count += 1
+                ctx.lmr_applied += 1
                 reduced_depth = max(0, depth - 1 - lmr_reduction)
                 score = -Negamax(board, reduced_depth, -alpha - 1, -alpha, ply + 1)
                 if alpha < score < beta:
+                    ctx.lmr_researches += 1
                     score = -Negamax(board, depth - 1, -beta, -alpha, ply + 1)
             else:
                 score = -Negamax(board, depth - 1, -alpha - 1, -alpha, ply + 1)
@@ -1297,7 +1436,7 @@ def Negamax(board: Board, depth: int, alpha: float, beta: float, ply: int = 0) -
 
 def Quiescence_Search(board: Board, alpha: float, beta: float, ply: int) -> float:
     if _Search_Should_Stop():
-        return Evaluate_Node(board)
+        return Evaluate_Node(board, caller="qsearch")
 
     ctx.quiescence_nodes += 1
     if ply > ctx.max_seldepth:
@@ -1313,13 +1452,13 @@ def Quiescence_Search(board: Board, alpha: float, beta: float, ply: int) -> floa
     if ctx.quiescence_nodes > qnode_budget:
         t1 = time.perf_counter()
         ctx.quiescence_time += t1 - t0
-        static_score = static_eval(board)
+        static_score = static_eval(board, caller="qsearch")
         return static_score if board.white_to_move else -static_score
 
     if qratio > 3.5 and ply >= 1:
         t1 = time.perf_counter()
         ctx.quiescence_time += t1 - t0
-        static_score = static_eval(board)
+        static_score = static_eval(board, caller="qsearch")
         return static_score if board.white_to_move else -static_score
 
     in_check = board.Is_King_In_Check(board.white_to_move)
@@ -1331,7 +1470,7 @@ def Quiescence_Search(board: Board, alpha: float, beta: float, ply: int) -> floa
             ctx.quiescence_time += t1 - t0
             return Terminal_Score(board, ply)
     else:
-        stand_pat = static_eval(board)
+        stand_pat = static_eval(board, caller="qsearch")
         if not board.white_to_move:
             stand_pat = -stand_pat
 
@@ -1353,18 +1492,27 @@ def Quiescence_Search(board: Board, alpha: float, beta: float, ply: int) -> floa
 
     for move in noisy_moves:
         if not in_check:
-            capture_tier = Capture_Quality_Tier(move)
-            if capture_tier == 0 and qratio > 1.7 and not move.is_pawn_promotion:
+            ctx.qsearch_noisy_considered += 1
+            should_search, risky_capture = _Should_Search_QCapture(board, move, qratio)
+            if not should_search:
+                ctx.qsearch_noisy_rejected += 1
                 continue
 
             captured_val = ABS_PIECE_VALUES.get(move.piece_captured or "", 0)
             promotion_gain = 775 if move.is_pawn_promotion else 0
             delta_margin = _Quiescence_Delta_Margin(move, qratio)
+            if risky_capture:
+                delta_margin = max(0, delta_margin - 20)
             if alpha < (MATE_SCORE - 500) and stand_pat + captured_val + promotion_gain + delta_margin < alpha:
+                ctx.qsearch_noisy_rejected += 1
                 continue
+        else:
+            ctx.qsearch_noisy_considered += 1
 
         if not board.Make_Move(move):
+            ctx.qsearch_noisy_rejected += 1
             continue
+        ctx.qsearch_noisy_accepted += 1
 
         score = -Quiescence_Search(board, -beta, -alpha, ply + 1)
         board.Undo_Move()
@@ -1667,7 +1815,7 @@ def _Print_Search_Stats(board: Board, best_move: Move | None):
         print(
             "nodes={nodes} qnodes={qnodes} tt_hits={hits} tt_cutoffs={cuts} "
             "depth={depth} seldepth={seldepth} score={score} time={time_s:.3f}s "
-            "nps={nps} asp={fl}/{fh}/{exp} pv={pv}".format(
+            "nps={nps} lmr={lmr_a}/{lmr_r} qrej={qrej} evals={evals} asp={fl}/{fh}/{exp} pv={pv}".format(
                 nodes=ctx.nodes_searched,
                 qnodes=ctx.quiescence_nodes,
                 hits=ctx.transposition_hits,
@@ -1677,6 +1825,10 @@ def _Print_Search_Stats(board: Board, best_move: Move | None):
                 score=score_text,
                 time_s=ctx.total_time_taken,
                 nps=stats["nps"],
+                lmr_a=ctx.lmr_applied,
+                lmr_r=ctx.lmr_researches,
+                qrej=ctx.qsearch_noisy_rejected,
+                evals=ctx.total_eval_calls,
                 fl=ctx.aspiration_fail_lows,
                 fh=ctx.aspiration_fail_highs,
                 exp=ctx.aspiration_window_expansions,
@@ -1692,6 +1844,12 @@ def _Print_Search_Stats(board: Board, best_move: Move | None):
         f"nodes={ctx.nodes_searched} qnodes={ctx.quiescence_nodes} qratio={q_ratio:.2f} total_nodes={stats['total_nodes']} "
         f"nps={stats['nps']} time_ms={stats['time_ms']} tt_hits={ctx.transposition_hits} "
         f"tt_cutoffs={ctx.transposition_cutoffs} hashfull={Get_Hashfull_Permill()} "
+        f"eval_calls={ctx.total_eval_calls} static_eval_calls={ctx.static_eval_calls} full_eval_calls={ctx.full_eval_calls} "
+        f"qsearch_eval_calls={ctx.qsearch_eval_calls} main_eval_calls={ctx.main_search_eval_calls} "
+        f"avg_eval_us={stats['avg_eval_time_us']:.1f} "
+        f"lmr_candidates={ctx.lmr_candidates} lmr_applied={ctx.lmr_applied} lmr_researches={ctx.lmr_researches} "
+        f"qsearch_noisy_considered={ctx.qsearch_noisy_considered} qsearch_noisy_accepted={ctx.qsearch_noisy_accepted} "
+        f"qsearch_noisy_rejected={ctx.qsearch_noisy_rejected} "
         f"asp_fail_low={ctx.aspiration_fail_lows} asp_fail_high={ctx.aspiration_fail_highs} "
         f"asp_expands={ctx.aspiration_window_expansions} "
         f"t_minimax={ctx.minimax_time:.3f} t_qsearch={ctx.quiescence_time:.3f} t_eval={ctx.evaluate_position_time:.3f}"
