@@ -1,3 +1,6 @@
+import cProfile
+import io
+import pstats
 import time
 import random
 import tkinter as tk
@@ -24,6 +27,16 @@ class TacticCase:
     depth: int
     expected_moves_uci: List[str]
     expect_checkmate: bool = False
+
+
+@dataclass
+class LegalMoveCase:
+    name: str
+    fen: str
+    required_moves_uci: List[str]
+    forbidden_moves_uci: List[str]
+    king_only: bool = False
+    captures_only: bool = False
 
 
 def coord_to_square(coord: tuple[int, int]) -> str:
@@ -135,6 +148,13 @@ def run_tactic_suite() -> tuple[bool, str]:
             expected_moves_uci=["e3e8", "c3d5"],
             expect_checkmate=False,
         ),
+        TacticCase(
+            name="check-evasion-capture",
+            fen="4r3/8/8/8/8/8/4Q3/4K3 w - - 0 1",
+            depth=3,
+            expected_moves_uci=["e2e8"],
+            expect_checkmate=False,
+        ),
     ]
 
     all_ok = True
@@ -187,13 +207,16 @@ def run_benchmark(depth: int = 4) -> tuple[bool, str]:
         t0 = time.perf_counter()
         best = Engine.Find_Best_Move(board, depth)
         elapsed = time.perf_counter() - t0
+        stats = Engine.Get_Search_Stats()
 
         ok = best is not None
         all_ok = all_ok and ok
         lines.append(
-            f"[{name}] best={move_to_uci(best)} score_cp={Engine.LAST_ROOT_SCORE:+.0f} "
-            f"nodes={Engine.NODES_SEARCHED} time={elapsed:.3f}s "
-            f"nps={(int(Engine.NODES_SEARCHED / elapsed) if elapsed > 0 else 0)}"
+            f"[{name}] best={move_to_uci(best)} score_cp={stats['score_cp']:+d} "
+            f"nodes={stats['nodes']} qnodes={stats['qnodes']} total_nodes={stats['total_nodes']} "
+            f"time={elapsed:.3f}s nps={stats['nps']} seldepth={stats['seldepth']} "
+            f"tt_hit_rate={stats['tt_hit_rate']:.3f} tt_cutoff_rate={stats['tt_cutoff_rate']:.3f} "
+            f"qratio={stats['qratio']:.2f} nmp={stats['nmp_used']} lmr={stats['lmr_count']}"
         )
 
     return all_ok, "\n".join(lines)
@@ -286,6 +309,61 @@ def run_terminal_state_suite() -> tuple[bool, str]:
     lines.append(
         f"[threefold] {'PASS' if repetition_ok else 'FAIL'} result={result} reason={reason} expected=(draw, threefold_repetition)"
     )
+
+    return all_ok, "\n".join(lines)
+
+
+def run_legality_suite() -> tuple[bool, str]:
+    cases = [
+        LegalMoveCase(
+            name="pinned-piece-restriction",
+            fen="4k3/8/8/8/8/2b5/3B4/4K3 w - - 0 1",
+            required_moves_uci=["d2c3"],
+            forbidden_moves_uci=["d2e3", "d2f4"],
+        ),
+        LegalMoveCase(
+            name="single-check-evasions",
+            fen="4r3/8/8/8/8/8/4Q3/4K3 w - - 0 1",
+            required_moves_uci=["e2e8"],
+            forbidden_moves_uci=["e2d3", "e2f3"],
+        ),
+        LegalMoveCase(
+            name="double-check-king-only",
+            fen="4r3/8/8/8/1b6/8/8/4KQ2 w - - 0 1",
+            required_moves_uci=[],
+            forbidden_moves_uci=["f1f8", "f1b5"],
+            king_only=True,
+        ),
+        LegalMoveCase(
+            name="ep-discovered-check",
+            fen="k7/8/8/4KPpr/8/8/8/8 w - g6 0 1",
+            required_moves_uci=[],
+            forbidden_moves_uci=["f5g6"],
+            captures_only=True,
+        ),
+    ]
+
+    all_ok = True
+    lines = ["=== Legality Suite ==="]
+
+    for case in cases:
+        board = Board()
+        board.Load_FEN(case.fen)
+        moves = board.Generate_Legal_Capture_Moves() if case.captures_only else board.Generate_Legal_Moves(include_castling=False)
+        move_ucis = {move.To_UCI() for move in moves}
+
+        required_ok = all(uci in move_ucis for uci in case.required_moves_uci)
+        forbidden_ok = all(uci not in move_ucis for uci in case.forbidden_moves_uci)
+        king_only_ok = True
+        if case.king_only:
+            king_only_ok = all(move.piece_moved.upper() == "K" for move in moves)
+
+        ok = required_ok and forbidden_ok and king_only_ok
+        all_ok = all_ok and ok
+        lines.append(
+            f"[{case.name}] {'PASS' if ok else 'FAIL'} required={case.required_moves_uci} "
+            f"forbidden={case.forbidden_moves_uci} moves={sorted(move_ucis)}"
+        )
 
     return all_ok, "\n".join(lines)
 
@@ -430,6 +508,40 @@ def run_search_stability_suite(depth: int = 4, repeats: int = 2) -> tuple[bool, 
     return all_ok, "\n".join(lines)
 
 
+def _profile_top_lines(label: str, fn, limit: int = 12) -> str:
+    profiler = cProfile.Profile()
+    profiler.enable()
+    result = fn()
+    profiler.disable()
+
+    stream = io.StringIO()
+    stats = pstats.Stats(profiler, stream=stream).sort_stats("cumulative")
+    stats.print_stats(limit)
+    return f"[{label}] result={result}\n{stream.getvalue().strip()}"
+
+
+def run_profile_suite(search_depth: int = 3, perft_depth: int = 3) -> tuple[bool, str]:
+    Engine.Toggle_Logging(False)
+    lines = ["=== Profile Suite ==="]
+
+    search_board = Board()
+    search_report = _profile_top_lines(
+        f"search-depth-{search_depth}",
+        lambda: move_to_uci(Engine.Find_Best_Move(search_board, search_depth)),
+    )
+    lines.append(search_report)
+    lines.append(f"[search-stats] {Engine.Get_Search_Stats()}")
+
+    perft_board = Board()
+    perft_report = _profile_top_lines(
+        f"perft-depth-{perft_depth}",
+        lambda: perft(perft_board, perft_depth),
+    )
+    lines.append(perft_report)
+
+    return True, "\n\n".join(lines)
+
+
 def run_full_regression(depth: int = 4) -> bool:
     previous_verbose = Engine.VERBOSE_SEARCH
     Engine.VERBOSE_SEARCH = False
@@ -450,6 +562,9 @@ def run_full_regression(depth: int = 4) -> bool:
         consistency_ok, consistency_report = run_consistency_suite()
         results.append((consistency_ok, consistency_report))
 
+        legality_ok, legality_report = run_legality_suite()
+        results.append((legality_ok, legality_report))
+
         terminal_ok, terminal_report = run_terminal_state_suite()
         results.append((terminal_ok, terminal_report))
 
@@ -461,6 +576,9 @@ def run_full_regression(depth: int = 4) -> bool:
 
         stability_ok, stability_report = run_search_stability_suite(depth=max(3, depth), repeats=2)
         results.append((stability_ok, stability_report))
+
+        profile_ok, profile_report = run_profile_suite(search_depth=min(depth, 3), perft_depth=3)
+        results.append((profile_ok, profile_report))
 
         print("\n\n".join(r[1] for r in results))
 

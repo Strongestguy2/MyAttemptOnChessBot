@@ -1,6 +1,18 @@
 from typing import Tuple, Optional
 
 class Move:
+    __slots__ = (
+        "start",
+        "end",
+        "piece_moved",
+        "piece_captured",
+        "is_pawn_promotion",
+        "promotion_choice",
+        "is_en_passant",
+        "is_castling",
+        "gives_check",
+    )
+
     def __init__(
             self,
             start: Tuple[int, int],

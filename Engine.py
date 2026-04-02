@@ -81,6 +81,7 @@ SEE_ENABLED = False
 MAX_TT_SIZE = 200000
 MAX_EVAL_CACHE_SIZE = 50000
 TEMPO_BONUS = 10
+EVAL_MODE = "classical"
 ENABLE_NULL_MOVE_PRUNING = True
 ENABLE_LATE_MOVE_PRUNING = True
 LOGGING_ENABLED = True
@@ -108,6 +109,7 @@ EXTENDED_CENTER_SQUARES = (
     (4, 2), (4, 3), (4, 4), (4, 5),
     (5, 2), (5, 3), (5, 4), (5, 5),
 )
+EXTENDED_CENTER_SET = frozenset(EXTENDED_CENTER_SQUARES)
 
 def Reset_Search_Stats():
 
@@ -335,6 +337,7 @@ def Get_Search_Stats() -> dict:
     elapsed = max(1e-9, ctx.total_time_taken)
     total_nodes = ctx.nodes_searched + ctx.quiescence_nodes
     qratio = _Current_QRatio()
+    tt_hit_rate = (ctx.transposition_hits / max(1, total_nodes))
     tt_cutoff_rate = (ctx.transposition_cutoffs / max(1, ctx.transposition_hits))
     return {
         "depth": ctx.last_search_depth,
@@ -349,10 +352,13 @@ def Get_Search_Stats() -> dict:
         "time_ms": int(ctx.total_time_taken * 1000),
         "nps": int(total_nodes / elapsed),
         "tt_hits": ctx.transposition_hits,
+        "tt_hit_rate": tt_hit_rate,
         "tt_cutoffs": ctx.transposition_cutoffs,
         "tt_cutoff_rate": tt_cutoff_rate,
         "hashfull_permille": Get_Hashfull_Permill(),
         "qratio": qratio,
+        "nmp_used": ctx.nmp_used,
+        "lmr_count": ctx.lmr_count,
         "asp_fail_low": ctx.aspiration_fail_lows,
         "asp_fail_high": ctx.aspiration_fail_highs,
         "asp_expands": ctx.aspiration_window_expansions,
@@ -392,6 +398,47 @@ def Estimate_Auto_Depth(board: Board, min_depth: int = 3, max_depth: int = 8, la
 
     return max(min_depth, min(max_depth, depth))
 
+def Capture_Quality_Tier(move: Move) -> int:
+    if move.is_pawn_promotion:
+        return 3
+
+    victim_value = ABS_PIECE_VALUES.get(move.piece_captured or "", 0)
+    attacker_value = ABS_PIECE_VALUES.get(move.piece_moved or "", 0)
+    trade_delta = victim_value - attacker_value
+
+    if trade_delta > 80:
+        return 2
+    if trade_delta >= -40:
+        return 1
+    return 0
+
+
+def _Capture_Order_Score(move: Move) -> int:
+    tier = Capture_Quality_Tier(move)
+    victim_value = ABS_PIECE_VALUES.get(move.piece_captured or "", 0)
+    attacker_value = ABS_PIECE_VALUES.get(move.piece_moved or "", 0)
+    check_bonus = CHECK_MOVE_BONUS if move.gives_check else 0
+
+    if move.is_pawn_promotion:
+        return 24000 + victim_value + check_bonus
+    if tier == 2:
+        return 18000 + victim_value * 10 - attacker_value + check_bonus
+    if tier == 1:
+        return 13000 + victim_value * 8 - attacker_value + check_bonus
+    return 2000 + victim_value * 4 - attacker_value + check_bonus
+
+
+def _Quiescence_Delta_Margin(move: Move, qratio: float) -> int:
+    tier = Capture_Quality_Tier(move)
+    if move.is_pawn_promotion:
+        return 140
+    if tier >= 2:
+        return 100 if qratio > 2.5 else 130
+    if tier == 1:
+        return 70 if qratio > 2.5 else 100
+    return 30 if qratio > 1.7 else 50
+
+
 def Order_Moves(board: Board, moves: list, depth: int, tt_move: Move | None = None):
     scored_moves = []
     for move in moves:
@@ -404,14 +451,7 @@ def Order_Moves(board: Board, moves: list, depth: int, tt_move: Move | None = No
     moves[:] = [move for _, move in scored_moves]
 
 def Order_Quiescence_Moves(board: Board, moves: list):
-    moves.sort(
-        key=lambda m: (
-            1 if m.is_pawn_promotion else 0,
-            1 if m.gives_check else 0,
-            ABS_PIECE_VALUES.get(m.piece_captured or "", 0) * 10 - ABS_PIECE_VALUES.get(m.piece_moved or "", 0),
-        ),
-        reverse=True,
-    )
+    moves.sort(key=_Capture_Order_Score, reverse=True)
 
 def Move_Gives_Check(board: Board, move: Move, cache: dict) -> bool:
     cache_key = hash(move)
@@ -487,7 +527,7 @@ def Evaluate_Mop_Up(board: Board, phase: int, white_material: int, black_materia
     return score * endgame_weight if winning_white else -score * endgame_weight
 
 
-def Evaluate_Position(board: Board) -> float:
+def evaluate_classical(board: Board) -> float:
     t0 = time.perf_counter()
     key = board.Hash_Board()
     cached_score = ctx.eval_cache.get(key)
@@ -495,6 +535,7 @@ def Evaluate_Position(board: Board) -> float:
         ctx.evaluate_position_time += time.perf_counter() - t0
         return cached_score
 
+    board_rows = board.board
     mg_score = TEMPO_BONUS if board.white_to_move else -TEMPO_BONUS
     eg_score = mg_score
     phase = 0
@@ -507,78 +548,111 @@ def Evaluate_Position(board: Board) -> float:
     black_pawns = [[] for _ in range(8)]
     white_piece_map = {"N": [], "B": [], "R": [], "Q": []}
     black_piece_map = {"N": [], "B": [], "R": [], "Q": []}
+    white_rooks_by_col = [0] * 8
+    black_rooks_by_col = [0] * 8
 
-    for row in range(8):
-        for col in range(8):
-            piece = board.board[row][col]
+    for row, board_row in enumerate(board_rows):
+        for col, piece in enumerate(board_row):
             if piece == ".":
                 continue
 
+            mg_score += PIECE_VALUES_CP[piece]
+            eg_score += PIECE_VALUES_CP[piece]
             if piece == "P":
                 white_pawns[col].append(row)
-            elif piece == "p":
+                white_material += 100
+                pst = PAWN_TABLE[row][col] * 10
+                mg_score += pst
+                eg_score += pst
+                continue
+            if piece == "p":
                 black_pawns[col].append(row)
-
-            if piece.upper() in white_piece_map:
-                if piece.isupper():
-                    white_piece_map[piece.upper()].append((row, col))
-                else:
-                    black_piece_map[piece.upper()].append((row, col))
-
-            # Material in centipawns.
-            piece_value = PIECE_VALUES_CP.get(piece, 0)
-            mg_score += piece_value
-            eg_score += piece_value
-            if piece.isupper():
-                white_material += ABS_PIECE_VALUES.get(piece, 0)
-            else:
-                black_material += ABS_PIECE_VALUES.get(piece, 0)
-
-            phase += PHASE_WEIGHTS.get(piece.upper(), 0)
-
-            # Piece-square tables from tables.py are pawn=10 scale; convert to cp.
-            table_row = row if piece.isupper() else 7 - row
-            if piece.upper() == "P":
+                black_material += 100
+                table_row = 7 - row
                 pst = PAWN_TABLE[table_row][col] * 10
-                mg_score += pst if piece.isupper() else -pst
-                eg_score += pst if piece.isupper() else -pst
-            elif piece.upper() == "N":
+                mg_score -= pst
+                eg_score -= pst
+                continue
+            if piece == "N":
+                white_piece_map["N"].append((row, col))
+                white_material += 320
+                phase += 1
+                pst = KNIGHT_TABLE[row][col] * 10
+                mg_score += pst
+                eg_score += pst
+                continue
+            if piece == "n":
+                black_piece_map["N"].append((row, col))
+                black_material += 320
+                phase += 1
+                table_row = 7 - row
                 pst = KNIGHT_TABLE[table_row][col] * 10
-                mg_score += pst if piece.isupper() else -pst
-                eg_score += pst if piece.isupper() else -pst
-            elif piece.upper() == "B":
+                mg_score -= pst
+                eg_score -= pst
+                continue
+            if piece == "B":
+                white_piece_map["B"].append((row, col))
+                white_bishop_count += 1
+                white_material += 330
+                phase += 1
+                pst = BISHOP_TABLE[row][col] * 10
+                mg_score += pst
+                eg_score += pst
+                continue
+            if piece == "b":
+                black_piece_map["B"].append((row, col))
+                black_bishop_count += 1
+                black_material += 330
+                phase += 1
+                table_row = 7 - row
                 pst = BISHOP_TABLE[table_row][col] * 10
-                mg_score += pst if piece.isupper() else -pst
-                eg_score += pst if piece.isupper() else -pst
-                if piece.isupper():
-                    white_bishop_count += 1
-                else:
-                    black_bishop_count += 1
-            elif piece.upper() == "R":
+                mg_score -= pst
+                eg_score -= pst
+                continue
+            if piece == "R":
+                white_piece_map["R"].append((row, col))
+                white_rooks_by_col[col] += 1
+                white_material += 500
+                phase += 2
+                pst = ROOK_TABLE[row][col] * 10
+                mg_score += pst
+                eg_score += pst
+                continue
+            if piece == "r":
+                black_piece_map["R"].append((row, col))
+                black_rooks_by_col[col] += 1
+                black_material += 500
+                phase += 2
+                table_row = 7 - row
                 pst = ROOK_TABLE[table_row][col] * 10
-                mg_score += pst if piece.isupper() else -pst
-                eg_score += pst if piece.isupper() else -pst
-            elif piece.upper() == "Q":
+                mg_score -= pst
+                eg_score -= pst
+                continue
+            if piece == "Q":
+                white_piece_map["Q"].append((row, col))
+                white_material += 900
+                phase += 4
+                pst = QUEEN_TABLE[row][col] * 10
+                mg_score += pst
+                eg_score += pst
+                continue
+            if piece == "q":
+                black_piece_map["Q"].append((row, col))
+                black_material += 900
+                phase += 4
+                table_row = 7 - row
                 pst = QUEEN_TABLE[table_row][col] * 10
-                mg_score += pst if piece.isupper() else -pst
-                eg_score += pst if piece.isupper() else -pst
-            elif piece.upper() == "K":
-                mg_pst = KING_MID_TABLE[table_row][col] * 10
-                eg_pst = KING_END_TABLE[table_row][col] * 10
-                if piece.isupper():
-                    mg_score += mg_pst
-                    eg_score += eg_pst
-                else:
-                    mg_score -= mg_pst
-                    eg_score -= eg_pst
-            
-    
-    white_rooks_by_col = [0] * 8
-    black_rooks_by_col = [0] * 8
-    for _, col in white_piece_map["R"]:
-        white_rooks_by_col[col] += 1
-    for _, col in black_piece_map["R"]:
-        black_rooks_by_col[col] += 1
+                mg_score -= pst
+                eg_score -= pst
+                continue
+            if piece == "K":
+                mg_score += KING_MID_TABLE[row][col] * 10
+                eg_score += KING_END_TABLE[row][col] * 10
+                continue
+            if piece == "k":
+                table_row = 7 - row
+                mg_score -= KING_MID_TABLE[table_row][col] * 10
+                eg_score -= KING_END_TABLE[table_row][col] * 10
 
     pawn_structure_score = Evaluate_Pawn_Structure(board, white_pawns, black_pawns, phase)
     open_file_score = Evaluate_Open_Files_And_Rooks(
@@ -603,10 +677,10 @@ def Evaluate_Position(board: Board) -> float:
     mop_up_score = Evaluate_Mop_Up(board, phase, white_material, black_material)
     queen_activity_score = 0
     for row, col in white_piece_map["Q"]:
-        if (row, col) in EXTENDED_CENTER_SQUARES:
+        if (row, col) in EXTENDED_CENTER_SET:
             queen_activity_score += 8
     for row, col in black_piece_map["Q"]:
-        if (row, col) in EXTENDED_CENTER_SQUARES:
+        if (row, col) in EXTENDED_CENTER_SET:
             queen_activity_score -= 8
 
     mg_score += (
@@ -661,13 +735,32 @@ def Evaluate_Position(board: Board) -> float:
                     score += see_score / 10  # small penalty to avoid hanging
     """
 
-    t1 = time.perf_counter()
-    ctx.evaluate_position_time += t1 - t0
-
     phase = max(0, min(24, phase))
     score = (mg_score * phase + eg_score * (24 - phase)) / 24
     _Store_Eval_Cache(key, score)
+    ctx.evaluate_position_time += time.perf_counter() - t0
     return score
+
+
+def evaluate_nnue(board: Board) -> float:
+    # Placeholder backend until a trained NNUE evaluator exists.
+    return evaluate_classical(board)
+
+
+def static_eval(board: Board) -> float:
+    if EVAL_MODE == "nnue":
+        return evaluate_nnue(board)
+    return evaluate_classical(board)
+
+
+def full_eval(board: Board) -> float:
+    if EVAL_MODE == "nnue":
+        return evaluate_nnue(board)
+    return evaluate_classical(board)
+
+
+def Evaluate_Position(board: Board) -> float:
+    return evaluate_classical(board)
 
 def Evaluate_Pawn_Structure(board: Board, white_pawns: list, black_pawns: list, phase: float) -> float:
     score = 0
@@ -1068,7 +1161,7 @@ def Terminal_Score(board: Board, ply: int) -> float:
 def Evaluate_Node(board: Board) -> float:
     if board.Is_Threefold_Repetition() or board.Is_Fifty_Move_Rule():
         return 0.0
-    score = Evaluate_Position(board)
+    score = full_eval(board)
     return score if board.white_to_move else -score
 
 def Negamax(board: Board, depth: int, alpha: float, beta: float, ply: int = 0) -> float:
@@ -1220,12 +1313,14 @@ def Quiescence_Search(board: Board, alpha: float, beta: float, ply: int) -> floa
     if ctx.quiescence_nodes > qnode_budget:
         t1 = time.perf_counter()
         ctx.quiescence_time += t1 - t0
-        return Evaluate_Node(board)
+        static_score = static_eval(board)
+        return static_score if board.white_to_move else -static_score
 
     if qratio > 3.5 and ply >= 1:
         t1 = time.perf_counter()
         ctx.quiescence_time += t1 - t0
-        return Evaluate_Node(board)
+        static_score = static_eval(board)
+        return static_score if board.white_to_move else -static_score
 
     in_check = board.Is_King_In_Check(board.white_to_move)
     if in_check:
@@ -1236,7 +1331,9 @@ def Quiescence_Search(board: Board, alpha: float, beta: float, ply: int) -> floa
             ctx.quiescence_time += t1 - t0
             return Terminal_Score(board, ply)
     else:
-        stand_pat = Evaluate_Node(board)
+        stand_pat = static_eval(board)
+        if not board.white_to_move:
+            stand_pat = -stand_pat
 
         if stand_pat >= beta:
             t1 = time.perf_counter()
@@ -1250,31 +1347,23 @@ def Quiescence_Search(board: Board, alpha: float, beta: float, ply: int) -> floa
             ctx.quiescence_time += t1 - t0
             return stand_pat
 
-        noisy_moves = board._Generate_Pseudo_Legal_Capture_Moves()
+        noisy_moves = board.Generate_Legal_Capture_Moves()
 
     Order_Quiescence_Moves(board, noisy_moves)
 
-    if qratio > 2.5:
-        delta_margin = 60
-    elif qratio > 1.7:
-        delta_margin = 90
-    else:
-        delta_margin = 120
-
     for move in noisy_moves:
-        # Delta pruning: skip low-value captures that cannot raise alpha.
         if not in_check:
+            capture_tier = Capture_Quality_Tier(move)
+            if capture_tier == 0 and qratio > 1.7 and not move.is_pawn_promotion:
+                continue
+
             captured_val = ABS_PIECE_VALUES.get(move.piece_captured or "", 0)
             promotion_gain = 775 if move.is_pawn_promotion else 0
-            # Keep tactical headroom in mate races and for promotions.
+            delta_margin = _Quiescence_Delta_Margin(move, qratio)
             if alpha < (MATE_SCORE - 500) and stand_pat + captured_val + promotion_gain + delta_margin < alpha:
                 continue
 
         if not board.Make_Move(move):
-            continue
-        # After Make_Move, side-to-move is opponent; validate king safety of the side that moved.
-        if board.Is_King_In_Check(not board.white_to_move):
-            board.Undo_Move()
             continue
 
         score = -Quiescence_Search(board, -beta, -alpha, ply + 1)
@@ -1373,31 +1462,15 @@ def Static_Exchange_Evaluation (board: Board, move: Move) -> int:
 
 
 def Score_Move (board: Board, move: Move, depth: int = 0) -> int:
-    "mvv-lva most valuable victim - least valuable attacker"
-    victim = move.piece_captured
-    attacker = move.piece_moved
-
-    if move.is_pawn_promotion:
-        return 20000 + CHECK_MOVE_BONUS if move.gives_check else 20000
-    
-    if victim:
-        victim_value = ABS_PIECE_VALUES.get(victim, 0)
-        attacker_value = ABS_PIECE_VALUES.get(attacker, 1)
-        trade_delta = victim_value - attacker_value
-        capture_score = 10000 + 12 * victim_value - 2 * attacker_value
-        capture_score += 1500 if trade_delta >= 0 else -1500
-        if SEE_ENABLED:
-            capture_score += Static_Exchange_Evaluation(board, move)
-        if move.gives_check:
-            capture_score += CHECK_MOVE_BONUS
-        return capture_score
+    if move.piece_captured or move.is_pawn_promotion:
+        return _Capture_Order_Score(move)
     
     if depth in ctx.killer_moves and move in ctx.killer_moves[depth]:
         index = ctx.killer_moves[depth].index(move)
-        return 8500 - (index * 300) + (CHECK_MOVE_BONUS if move.gives_check else 0)
+        return 9000 - (index * 400) + (CHECK_MOVE_BONUS if move.gives_check else 0)
     
     key = (move.start, move.end)
-    return ctx.history_heuristic.get(key, 0) + (CHECK_MOVE_BONUS if move.gives_check else 0)
+    return 4000 + ctx.history_heuristic.get(key, 0) + (CHECK_MOVE_BONUS if move.gives_check else 0)
 
 
 def Find_Best_Move(

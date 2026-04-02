@@ -1,6 +1,64 @@
+from dataclasses import dataclass
 from typing import Optional, Tuple, List
 from Move import Move
 from Zobrist import hash_board, ZOBRIST_PIECES, ZOBRIST_CASTLING, ZOBRIST_EN_PASSANT, ZOBRIST_TURN
+
+
+_ORTHOGONAL_DIRECTIONS = ((1, 0), (-1, 0), (0, 1), (0, -1))
+_DIAGONAL_DIRECTIONS = ((1, 1), (1, -1), (-1, 1), (-1, -1))
+_ALL_DIRECTIONS = _ORTHOGONAL_DIRECTIONS + _DIAGONAL_DIRECTIONS
+_KNIGHT_JUMPS = (
+    (2, 1), (1, 2), (-1, 2), (-2, 1),
+    (-2, -1), (-1, -2), (1, -2), (2, -1),
+)
+_KING_STEPS = (
+    (-1, -1), (-1, 0), (-1, 1),
+    (0, -1),           (0, 1),
+    (1, -1),  (1, 0),  (1, 1),
+)
+_WHITE_PIECES = frozenset("PNBRQK")
+_BLACK_PIECES = frozenset("pnbrqk")
+
+
+def _Build_Attack_Origin_Masks(deltas: Tuple[Tuple[int, int], ...]) -> tuple[tuple[tuple[Tuple[int, int], ...], ...], ...]:
+    masks = []
+    for row in range(8):
+        row_masks = []
+        for col in range(8):
+            origins = []
+            for dr, dc in deltas:
+                origin_row = row + dr
+                origin_col = col + dc
+                if 0 <= origin_row < 8 and 0 <= origin_col < 8:
+                    origins.append((origin_row, origin_col))
+            row_masks.append(tuple(origins))
+        masks.append(tuple(row_masks))
+    return tuple(masks)
+
+
+_KNIGHT_ATTACK_ORIGINS = _Build_Attack_Origin_Masks(_KNIGHT_JUMPS)
+_KING_ATTACK_ORIGINS = _Build_Attack_Origin_Masks(_KING_STEPS)
+_WHITE_PAWN_ATTACK_ORIGINS = _Build_Attack_Origin_Masks(((1, -1), (1, 1)))
+_BLACK_PAWN_ATTACK_ORIGINS = _Build_Attack_Origin_Masks(((-1, -1), (-1, 1)))
+
+
+@dataclass(slots=True)
+class MoveState:
+    move: Optional[Move]
+    captured_piece: str
+    castling_rights: frozenset[str]
+    en_passant_square: Optional[Tuple[int, int]]
+    halfmove_clock: int
+    fullmove_number: int
+    white_to_move: bool
+    moved_piece: str
+    zobrist_key: int
+    white_king_pos: Tuple[int, int]
+    black_king_pos: Tuple[int, int]
+    rook_from: Optional[Tuple[int, int]] = None
+    rook_to: Optional[Tuple[int, int]] = None
+    ep_capture: Optional[Tuple[int, int, str]] = None
+    repetition_hash: Optional[int] = None
 
 
 class Board:
@@ -277,97 +335,232 @@ class Board:
                 if not self._Is_Square_Attacked((0, 4), True) and not self._Is_Square_Attacked((0, 3), True) and not self._Is_Square_Attacked((0, 2), True):
                     moves.append (Move((0, 4), (0, 2), "k", is_castling=True))
 
-    _DIRECTIONS = [
-        (1, 0), (-1, 0), (0, 1), (0, -1),
-        (1, 1), (1, -1), (-1, 1), (-1, -1)
-    ]
-    _KNIGHT_JUMPS = [
-        (2, 1), (1, 2), (-1, 2), (-2, 1),
-        (-2, -1), (-1, -2), (1, -2), (2, -1)
-    ]
-
     def _Is_Square_Attacked(self, position: tuple, by_white: bool) -> bool:
         row, col = position
+        board = self.board
+        pawn_origins = _WHITE_PAWN_ATTACK_ORIGINS if by_white else _BLACK_PAWN_ATTACK_ORIGINS
+        attacker_pawn = 'P' if by_white else 'p'
+        for origin_row, origin_col in pawn_origins[row][col]:
+            if board[origin_row][origin_col] == attacker_pawn:
+                return True
 
-        for dr, dc in self._DIRECTIONS:
+        attacker_knight = 'N' if by_white else 'n'
+        for origin_row, origin_col in _KNIGHT_ATTACK_ORIGINS[row][col]:
+            if board[origin_row][origin_col] == attacker_knight:
+                return True
+
+        attacker_king = 'K' if by_white else 'k'
+        for origin_row, origin_col in _KING_ATTACK_ORIGINS[row][col]:
+            if board[origin_row][origin_col] == attacker_king:
+                return True
+
+        rook = 'R' if by_white else 'r'
+        bishop = 'B' if by_white else 'b'
+        queen = 'Q' if by_white else 'q'
+
+        for dr, dc in _ORTHOGONAL_DIRECTIONS:
             r, c = row + dr, col + dc
             while 0 <= r < 8 and 0 <= c < 8:
-                piece = self.board[r][c]
+                piece = board[r][c]
                 if piece == '.':
                     r += dr
                     c += dc
                     continue
-                if piece.isupper() != by_white:
-                    break
-                if piece.upper() == 'Q':
-                    return True
-                if (dr == 0 or dc == 0) and piece.upper() == 'R':
-                    return True
-                if (dr != 0 and dc != 0) and piece.upper() == 'B':
+                if piece == rook or piece == queen:
                     return True
                 break
 
-        for dr, dc in self._KNIGHT_JUMPS:
+        for dr, dc in _DIAGONAL_DIRECTIONS:
             r, c = row + dr, col + dc
-            if 0 <= r < 8 and 0 <= c < 8:
-                piece = self.board[r][c]
-                if piece.upper() == 'N' and piece.isupper() == by_white:
-                    return True
-
-        pawn_dir = 1 if by_white else -1
-        for dc in [-1, 1]:
-            r, c = row + pawn_dir, col + dc
-            if 0 <= r < 8 and 0 <= c < 8:
-                piece = self.board[r][c]
-                if piece.upper() == 'P' and piece.isupper() == by_white:
-                    return True
-
-        for dr in [-1, 0, 1]:
-            for dc in [-1, 0, 1]:
-                if dr == 0 and dc == 0:
+            while 0 <= r < 8 and 0 <= c < 8:
+                piece = board[r][c]
+                if piece == '.':
+                    r += dr
+                    c += dc
                     continue
-                r, c = row + dr, col + dc
-                if 0 <= r < 8 and 0 <= c < 8:
-                    piece = self.board[r][c]
-                    if piece.upper() == 'K' and piece.isupper() == by_white:
-                        return True
+                if piece == bishop or piece == queen:
+                    return True
+                break
 
         return False
+
+    def _Analyze_King_Status(self, white: bool):
+        king_pos = self.Find_King(white)
+        if king_pos == (-1, -1):
+            return king_pos, (), {}, frozenset()
+
+        board = self.board
+        king_row, king_col = king_pos
+        friendly_pieces = _WHITE_PIECES if white else _BLACK_PIECES
+        enemy_pawn = 'p' if white else 'P'
+        enemy_knight = 'n' if white else 'N'
+        enemy_king = 'k' if white else 'K'
+        enemy_rook = 'r' if white else 'R'
+        enemy_bishop = 'b' if white else 'B'
+        enemy_queen = 'q' if white else 'Q'
+
+        checkers = []
+        evasion_squares = set()
+        pinned = {}
+
+        pawn_origins = _BLACK_PAWN_ATTACK_ORIGINS if white else _WHITE_PAWN_ATTACK_ORIGINS
+        for attacker_row, attacker_col in pawn_origins[king_row][king_col]:
+            if board[attacker_row][attacker_col] == enemy_pawn:
+                checkers.append((attacker_row, attacker_col))
+                evasion_squares.add((attacker_row, attacker_col))
+
+        for attacker_row, attacker_col in _KNIGHT_ATTACK_ORIGINS[king_row][king_col]:
+            if board[attacker_row][attacker_col] == enemy_knight:
+                checkers.append((attacker_row, attacker_col))
+                evasion_squares.add((attacker_row, attacker_col))
+
+        for attacker_row, attacker_col in _KING_ATTACK_ORIGINS[king_row][king_col]:
+            if board[attacker_row][attacker_col] == enemy_king:
+                checkers.append((attacker_row, attacker_col))
+                evasion_squares.add((attacker_row, attacker_col))
+
+        for dr, dc in _ALL_DIRECTIONS:
+            ray_squares = []
+            pin_candidate = None
+            pin_ray = []
+            r, c = king_row + dr, king_col + dc
+
+            while 0 <= r < 8 and 0 <= c < 8:
+                piece = board[r][c]
+                if piece == '.':
+                    if pin_candidate is None:
+                        ray_squares.append((r, c))
+                    else:
+                        pin_ray.append((r, c))
+                    r += dr
+                    c += dc
+                    continue
+
+                if piece in friendly_pieces:
+                    if pin_candidate is None:
+                        pin_candidate = (r, c)
+                    else:
+                        break
+                else:
+                    straight = dr == 0 or dc == 0
+                    valid_slider = (
+                        piece == enemy_queen
+                        or (straight and piece == enemy_rook)
+                        or ((not straight) and piece == enemy_bishop)
+                    )
+                    if pin_candidate is None:
+                        if valid_slider:
+                            checkers.append((r, c))
+                            evasion_squares.update(ray_squares)
+                            evasion_squares.add((r, c))
+                    elif valid_slider:
+                        pinned[pin_candidate] = frozenset(pin_ray + [(r, c)])
+                    break
+
+                r += dr
+                c += dc
+
+        return king_pos, tuple(checkers), pinned, frozenset(evasion_squares)
+
+    def _Is_Noisy_Move(self, move: Move) -> bool:
+        return bool(move.piece_captured or move.is_pawn_promotion)
+
+    def _Move_Evades_Check(self, move: Move, evasion_squares: frozenset[Tuple[int, int]]) -> bool:
+        if move.end in evasion_squares:
+            return True
+        if move.is_en_passant:
+            return (move.start[0], move.end[1]) in evasion_squares
+        return False
+
+    def _Validate_Legal_Move(self, move: Move) -> bool:
+        self.Make_Move(move)
+        is_legal = not self.Is_King_In_Check(not self.white_to_move)
+        self.Undo_Move()
+        return is_legal
+
+    def _Is_Legal_King_Move(self, move: Move, enemy_is_white: bool) -> bool:
+        if move.is_castling:
+            return True
+
+        board = self.board
+        from_row, from_col = move.start
+        to_row, to_col = move.end
+        moved_piece = board[from_row][from_col]
+        captured_piece = board[to_row][to_col]
+
+        board[from_row][from_col] = '.'
+        board[to_row][to_col] = moved_piece
+        is_legal = not self._Is_Square_Attacked((to_row, to_col), enemy_is_white)
+        board[to_row][to_col] = captured_piece
+        board[from_row][from_col] = moved_piece
+        return is_legal
+
+    def _Generate_Legal_Moves_Core(self, include_castling: bool, noisy_only: bool) -> list:
+        side_to_move_is_white = self.white_to_move
+        _, checkers, pinned, evasion_squares = self._Analyze_King_Status(side_to_move_is_white)
+        checker_count = len(checkers)
+        enemy_is_white = not side_to_move_is_white
+        legal_moves = []
+        append_move = legal_moves.append
+
+        for row in range(8):
+            board_row = self.board[row]
+            for col in range(8):
+                piece = board_row[col]
+                if piece == '.' or piece.isupper() != side_to_move_is_white:
+                    continue
+
+                piece_type = piece.upper()
+                if checker_count >= 2 and piece_type != 'K':
+                    continue
+
+                piece_moves = []
+                self._Generate_Piece_Moves(piece, row, col, piece_moves, include_castling)
+                pin_mask = pinned.get((row, col))
+
+                for move in piece_moves:
+                    if noisy_only and not self._Is_Noisy_Move(move):
+                        continue
+
+                    if piece_type == 'K':
+                        if self._Is_Legal_King_Move(move, enemy_is_white):
+                            append_move(move)
+                        continue
+
+                    if pin_mask is not None and move.end not in pin_mask:
+                        continue
+
+                    if checker_count == 1 and not self._Move_Evades_Check(move, evasion_squares):
+                        continue
+
+                    if move.is_en_passant and not self._Validate_Legal_Move(move):
+                        continue
+
+                    append_move(move)
+
+        return legal_moves
 
     def _Filter_Legal_Moves(self, pseudo_moves: list) -> list:
         legal_moves = []
         append_move = legal_moves.append
-
         for move in pseudo_moves:
-            self.Make_Move(move)
-            if not self.Is_King_In_Check(not self.white_to_move):
+            if self._Validate_Legal_Move(move):
                 append_move(move)
-            self.Undo_Move()
-
         return legal_moves
-
 
     def Generate_Legal_Moves(self, include_castling=True) -> list:
         import time
         t0 = time.perf_counter()
-
-        pseudo_moves = self.Get_Pseudo_Legal_Moves(include_castling)
-        legal_moves = self._Filter_Legal_Moves(pseudo_moves)
-
-        t1 = time.perf_counter()
-        Board.FIND_LEGAL_MOVES_TIME += t1 - t0
+        legal_moves = self._Generate_Legal_Moves_Core(include_castling=include_castling, noisy_only=False)
+        Board.FIND_LEGAL_MOVES_TIME += time.perf_counter() - t0
         return legal_moves
 
     def Generate_Legal_Capture_Moves(self) -> list:
         import time
         t0 = time.perf_counter()
-
-        pseudo_noisy_moves = self._Generate_Pseudo_Legal_Capture_Moves()
-        legal_capture_moves = self._Filter_Legal_Moves(pseudo_noisy_moves)
-
-        t1 = time.perf_counter()
-        Board.FIND_LEGAL_MOVES_TIME += t1 - t0
-        return legal_capture_moves
+        legal_moves = self._Generate_Legal_Moves_Core(include_castling=False, noisy_only=True)
+        Board.FIND_LEGAL_MOVES_TIME += time.perf_counter() - t0
+        return legal_moves
 
     def _Generate_Pseudo_Legal_Capture_Moves(self) -> list:
         pseudo_noisy_moves = []
@@ -385,7 +578,7 @@ class Board:
 
     def Is_King_In_Check(self, white: Optional[bool] = None) -> bool:
         king_is_white = self.white_to_move if white is None else white
-        king_pos = self.Find_King(king_is_white)
+        king_pos = self.white_king_pos if king_is_white else self.black_king_pos
         if king_pos == (-1, -1):
             return False
         return self._Is_Square_Attacked(king_pos, not king_is_white)
@@ -394,23 +587,24 @@ class Board:
         return self.white_king_pos if white else self.black_king_pos
         
     def Make_Move(self, move: Move):
+        board = self.board
         from_row, from_col = move.start
         to_row, to_col = move.end
-        captured_piece = self.board[to_row][to_col]
-
-        state = {
-            'move': move,
-            'captured_piece': captured_piece,
-            'castling_rights': self.castling_rights.copy(),
-            'en_passant_square': self.en_passant_square,
-            'halfmove_clock': self.halfmove_clock,
-            'fullmove_number': self.fullmove_number,
-            'white_to_move': self.white_to_move,
-            'moved_piece': self.board[from_row][from_col],
-            'zobrist_key': self.zobrist_key,
-            'white_king_pos': self.white_king_pos,
-            'black_king_pos': self.black_king_pos,
-        }
+        moved_piece = board[from_row][from_col]
+        captured_piece = board[to_row][to_col]
+        state = MoveState(
+            move=move,
+            captured_piece=captured_piece,
+            castling_rights=frozenset(self.castling_rights),
+            en_passant_square=self.en_passant_square,
+            halfmove_clock=self.halfmove_clock,
+            fullmove_number=self.fullmove_number,
+            white_to_move=self.white_to_move,
+            moved_piece=moved_piece,
+            zobrist_key=self.zobrist_key,
+            white_king_pos=self.white_king_pos,
+            black_king_pos=self.black_king_pos,
+        )
 
         # Remove old turn
         if self.white_to_move:
@@ -423,8 +617,6 @@ class Board:
         # Remove old castling
         for cr in self.castling_rights:
             self.zobrist_key ^= ZOBRIST_CASTLING[cr]
-
-        moved_piece = self.board[from_row][from_col]
         
         # Remove old location of moved_piece
         self.zobrist_key ^= ZOBRIST_PIECES[(moved_piece, from_row, from_col)]
@@ -434,10 +626,10 @@ class Board:
 
         if move.is_en_passant:
             capture_row = to_row + (1 if self.white_to_move else -1)
-            state['ep_capture'] = (capture_row, to_col, self.board[capture_row][to_col])
-            ep_captured_piece = self.board[capture_row][to_col]
+            ep_captured_piece = board[capture_row][to_col]
+            state.ep_capture = (capture_row, to_col, ep_captured_piece)
             self.zobrist_key ^= ZOBRIST_PIECES[(ep_captured_piece, capture_row, to_col)]
-            self.board[capture_row][to_col] = '.'
+            board[capture_row][to_col] = '.'
 
         if move.is_castling:
             if to_col - from_col == 2:
@@ -446,12 +638,13 @@ class Board:
             else:
                 rook_from = (from_row, 0)
                 rook_to = (from_row, 3)
-            state['rook_move'] = (rook_from, rook_to)
-            rook_piece = self.board[rook_from[0]][rook_from[1]]
+            state.rook_from = rook_from
+            state.rook_to = rook_to
+            rook_piece = board[rook_from[0]][rook_from[1]]
             self.zobrist_key ^= ZOBRIST_PIECES[(rook_piece, rook_from[0], rook_from[1])]
             self.zobrist_key ^= ZOBRIST_PIECES[(rook_piece, rook_to[0], rook_to[1])]
-            self.board[rook_to[0]][rook_to[1]] = rook_piece
-            self.board[rook_from[0]][rook_from[1]] = '.'
+            board[rook_to[0]][rook_to[1]] = rook_piece
+            board[rook_from[0]][rook_from[1]] = '.'
 
         self.move_history.append(state)
         self.en_passant_square = None
@@ -464,17 +657,17 @@ class Board:
         if move.is_pawn_promotion:
             promotion_choice = (move.promotion_choice or 'Q').upper()
             promoted_piece = promotion_choice if moved_piece.isupper() else promotion_choice.lower()
-            self.board[to_row][to_col] = promoted_piece
+            board[to_row][to_col] = promoted_piece
             self.zobrist_key ^= ZOBRIST_PIECES[(promoted_piece, to_row, to_col)]
         else:
-            self.board[to_row][to_col] = moved_piece
+            board[to_row][to_col] = moved_piece
             self.zobrist_key ^= ZOBRIST_PIECES[(moved_piece, to_row, to_col)]
             if moved_piece == 'K':
                 self.white_king_pos = (to_row, to_col)
             elif moved_piece == 'k':
                 self.black_king_pos = (to_row, to_col)
 
-        self.board[from_row][from_col] = '.'
+        board[from_row][from_col] = '.'
 
         # Update castling rights when rooks or king move
         if moved_piece == 'K':
@@ -518,8 +711,9 @@ class Board:
             self.fullmove_number += 1
 
         if self.track_repetition:
-            state['hash'] = self.Hash_Board()
-            self.position_history[state['hash']] = self.position_history.get(state['hash'], 0) + 1
+            repetition_hash = self.Hash_Board()
+            state.repetition_hash = repetition_hash
+            self.position_history[repetition_hash] = self.position_history.get(repetition_hash, 0) + 1
 
         move.gives_check = self.Is_King_In_Check(self.white_to_move)
 
@@ -527,17 +721,21 @@ class Board:
 
 
     def Make_Null_Move(self):
-        self.move_history.append({
-            'move': None,
-            'castling_rights': self.castling_rights.copy(),
-            'en_passant_square': self.en_passant_square,
-            'halfmove_clock': self.halfmove_clock,
-            'fullmove_number': self.fullmove_number,
-            'white_to_move': self.white_to_move,
-            'zobrist_key': self.zobrist_key,
-            'white_king_pos': self.white_king_pos,
-            'black_king_pos': self.black_king_pos,
-        })
+        self.move_history.append(
+            MoveState(
+                move=None,
+                captured_piece='.',
+                castling_rights=frozenset(self.castling_rights),
+                en_passant_square=self.en_passant_square,
+                halfmove_clock=self.halfmove_clock,
+                fullmove_number=self.fullmove_number,
+                white_to_move=self.white_to_move,
+                moved_piece='.',
+                zobrist_key=self.zobrist_key,
+                white_king_pos=self.white_king_pos,
+                black_king_pos=self.black_king_pos,
+            )
+        )
         if self.white_to_move:
             self.zobrist_key ^= ZOBRIST_TURN
         
@@ -555,54 +753,51 @@ class Board:
 
     def Undo_Null_Move(self):
         last_state = self.move_history.pop()
-        self.castling_rights = last_state['castling_rights']
-        self.en_passant_square = last_state['en_passant_square']
-        self.halfmove_clock = last_state['halfmove_clock']
-        self.fullmove_number = last_state['fullmove_number']
-        self.white_to_move = last_state['white_to_move']
-        self.zobrist_key = last_state['zobrist_key']
-        self.white_king_pos = last_state['white_king_pos']
-        self.black_king_pos = last_state['black_king_pos']
+        self.castling_rights = set(last_state.castling_rights)
+        self.en_passant_square = last_state.en_passant_square
+        self.halfmove_clock = last_state.halfmove_clock
+        self.fullmove_number = last_state.fullmove_number
+        self.white_to_move = last_state.white_to_move
+        self.zobrist_key = last_state.zobrist_key
+        self.white_king_pos = last_state.white_king_pos
+        self.black_king_pos = last_state.black_king_pos
 
     def Undo_Move (self):
         if not self.move_history:
             return
 
         last_state = self.move_history.pop()
-        move = last_state['move']
+        move = last_state.move
         from_row, from_col = move.start
         to_row, to_col = move.end
 
         # Restore moved piece
-        if move.is_pawn_promotion:
-            self.board[from_row][from_col] = last_state['moved_piece']
-            self.board[to_row][to_col] = last_state['captured_piece']
-        else:
-            self.board[from_row][from_col] = last_state['moved_piece']
-            self.board[to_row][to_col] = last_state['captured_piece']
+        self.board[from_row][from_col] = last_state.moved_piece
+        self.board[to_row][to_col] = last_state.captured_piece
 
         # Undo en passant capture
-        if move.is_en_passant and 'ep_capture' in last_state:
-            r, c, piece = last_state['ep_capture']
+        if move.is_en_passant and last_state.ep_capture is not None:
+            r, c, piece = last_state.ep_capture
             self.board[r][c] = piece
 
         # Undo castling rook move
-        if move.is_castling and 'rook_move' in last_state:
-            rook_from, rook_to = last_state['rook_move']
+        if move.is_castling and last_state.rook_from is not None and last_state.rook_to is not None:
+            rook_from = last_state.rook_from
+            rook_to = last_state.rook_to
             self.board[rook_from[0]][rook_from[1]] = self.board[rook_to[0]][rook_to[1]]
             self.board[rook_to[0]][rook_to[1]] = '.'
 
-        self.castling_rights = last_state['castling_rights']
-        self.en_passant_square = last_state['en_passant_square']
-        self.halfmove_clock = last_state['halfmove_clock']
-        self.fullmove_number = last_state['fullmove_number']
-        self.white_to_move = last_state['white_to_move']
-        self.zobrist_key = last_state['zobrist_key']
-        self.white_king_pos = last_state['white_king_pos']
-        self.black_king_pos = last_state['black_king_pos']
+        self.castling_rights = set(last_state.castling_rights)
+        self.en_passant_square = last_state.en_passant_square
+        self.halfmove_clock = last_state.halfmove_clock
+        self.fullmove_number = last_state.fullmove_number
+        self.white_to_move = last_state.white_to_move
+        self.zobrist_key = last_state.zobrist_key
+        self.white_king_pos = last_state.white_king_pos
+        self.black_king_pos = last_state.black_king_pos
 
-        if self.track_repetition and 'hash' in last_state:
-            key = last_state['hash']
+        if self.track_repetition and last_state.repetition_hash is not None:
+            key = last_state.repetition_hash
             if key in self.position_history:
                 self.position_history[key] -= 1
                 if self.position_history[key] == 0:
