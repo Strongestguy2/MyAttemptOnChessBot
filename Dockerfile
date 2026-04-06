@@ -5,6 +5,7 @@ WORKDIR /app
 # Good defaults
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
+ENV CHESSBOT_GUI=0
 
 # Copy dependency file first if you have one
 COPY requirements.txt /app/requirements.txt
